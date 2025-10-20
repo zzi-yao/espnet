@@ -67,7 +67,7 @@ class DataIteratorFactory:
         self,
         unregistered_specifier: str,
         registered_specifier: str,
-        stats_dir: Union[str, Path],
+        stats_dir: Union[str, Path] = None,
         collate_fn: Optional[Callable] = None,
         loader_state: Optional[Dict] = None,
         batchfy_method: str = "bucket",
@@ -76,11 +76,13 @@ class DataIteratorFactory:
         rank: int = 0,
         world_size: int = 1,
         shuffle: bool = False,
+        sequential_load: bool = False,
         seed: int = 42,
     ):
         self.collate_fn = collate_fn
         self.num_workers = num_workers
         self.shuffle = shuffle
+        self.sequential_load = sequential_load
         self.seed = seed
 
         # Convert stats_dir to Path if it's a string
@@ -112,7 +114,24 @@ class DataIteratorFactory:
         # Store dataset for later use
         self.dataset = dataset
 
-        if loader_state is None:
+        if self.sequential_load:
+            assert self.num_workers == 0, "No multiple workers during collect_stats"
+
+            all_subsets = dataset.get_all_examples()
+            self.batched_examples = []
+            for entry in cache_registered + cache_unregistered:
+                # Extract fields based on tuple structure
+                # Registered: (task, name, factor)
+                # Unregistered: (task, name, data_json, factor)
+                task = entry[0]
+                data_name = entry[1]
+
+                data_list = all_subsets[data_name]
+                data_list = [(task, data_name, example_id) for example_id in data_list]
+                # Accumulate all examples as individual batches
+                self.batched_examples.extend([[example] for example in data_list])
+
+        elif loader_state is None:
             # (3) build all (task, dataset, example_id) for indexing
             all_subsets = dataset.get_all_examples()
             all_examples = list()
@@ -135,8 +154,13 @@ class DataIteratorFactory:
 
                 stat_file = stats_dir / f"stats_{task}_{data_name}.jsonl"
                 stat_dict = _load_stats(stat_file, task, data_name)
-                stat_dict = {key: stat_dict[key] for key in data_list}
-                all_lengths.update(stat_dict)
+                # Only keep stats for the examples we're using
+                filtered_stats = {
+                    key: stat_dict[key]
+                    for key in data_list
+                    if key in stat_dict
+                }
+                all_lengths.update(filtered_stats)
                 logging.info(f"Task={task}, data_name={data_name}, factor={factor}")
 
             # (4) Build batches
@@ -148,16 +172,17 @@ class DataIteratorFactory:
             # (5) Synchronize batches across GPU ranks
             batched_examples = synchronize_batches(batched_examples)
             logging.info(
-                f"Number of batches after synchronization: " f"{len(batched_examples)}"
+                f"Number of batches after synchronization: {len(batched_examples)}"
             )
 
             self.batched_examples = batched_examples
+            # TODO: save this state for later usage.
 
         else:
             # Load batched_examples from saved state
             self.load_iterator_state(loader_state)
 
-    def get_iterator(self, global_step: int, length: int) -> DataLoader:
+    def get_iterator(self, global_step: int = 0, length: int = None) -> DataLoader:
         """Get a DataLoader for a specific range of batches.
 
         Supports endless epochs by wrapping around when batches are
@@ -175,6 +200,9 @@ class DataIteratorFactory:
             ValueError: If validation fails or no batches available.
         """
         total_batches = len(self.batched_examples)
+
+        if length is None:
+            length = total_batches
 
         # Validate parameters
         if global_step < 0:

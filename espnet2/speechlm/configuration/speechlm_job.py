@@ -43,8 +43,11 @@ class SpeechLMJobTemplate(AbsJobTemplate):
             config: Dictionary containing job configuration parameters.
         """
         super().__init__(config)
+
+        # (1) keep other configs
+        self.config = config
         
-        # (1) build tokenizers and vocabulary
+        # (2) build tokenizers and vocabulary
         io_config = config['multimodal_io']
         self.multimodal_io = dict()
         for io_name, io_config in io_config.items():
@@ -53,9 +56,6 @@ class SpeechLMJobTemplate(AbsJobTemplate):
             self.multimodal_io[io_name] = multimodle_io_choices[io_name](**io_config)
         
         self.vocab, self.vocab_interval = self._build_vocabulary()
-
-        # (2) keep other configs
-        self.config = config
 
     def _build_vocabulary(self, num_special_tokens=256):
         # (1) Initial special token. We keep a fixed number of slots
@@ -94,8 +94,15 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         Returns:
             A callable function for collating SpeechLM batch data.
         """
-        # TODO: Implement SpeechLM collate function
-        pass
+
+        processor_config = self.config['preprocessor']
+        return SpeechLMPreprocessor(
+            multimodal_io=self.multimodal_io,
+            vocab=self.vocab,
+            vocab_interval=self.vocab_interval,
+            audio_input=processor_config['audio_input'],
+            audio_output=processor_config['audio_output'],
+        )
 
     def build_model(self) -> nn.Module:
         """Build the SpeechLM model.
@@ -136,14 +143,11 @@ class SpeechLMPreprocessor:
         self.audio_input = audio_input
         self.audio_output = audio_output
 
-
         # (2) vocabulary
         self.vocab = vocab
         self.vocab_interval = vocab_interval
 
         # (3) Additional add-on operations:
-
-
         self.find_length_only = find_length_only
     
     def __call__(self, data_lst):
@@ -156,8 +160,6 @@ class SpeechLMPreprocessor:
             messages = self._apply_chat_template(data_dict, task)
         else:
             messages = data_dict['dialogue']
-        
-        
 
         raise NotImplementedError
     

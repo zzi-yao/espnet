@@ -731,7 +731,7 @@ class ContinuousAudioIO(AbsIO):
         encoder_choice: str = "huggingface",
         encoder_hf_model_tag: str = "Qwen/Qwen2.5-Omni-7B",
         attn_implementation: str = None,
-        torch_dtype: str = "bfloat16",
+        dtype: str = "bfloat16",
         device: str = "cpu",
     ):
         """Initialize continuous audio encoder.
@@ -754,7 +754,7 @@ class ContinuousAudioIO(AbsIO):
         self.encoder_choice = encoder_choice
         self.encoder_hf_model_tag = encoder_hf_model_tag
         self.attn_implementation = attn_implementation
-        self.torch_dtype = torch_dtype
+        self.dtype = dtype
 
         self._init_encoder(encoder_choice, encoder_hf_model_tag)
 
@@ -792,7 +792,7 @@ class ContinuousAudioIO(AbsIO):
                 audio_tower = Qwen2_5OmniForConditionalGeneration.from_pretrained(
                     encoder_hf_model_tag,
                     attn_implementation=self.attn_implementation,
-                    torch_dtype=self.torch_dtype,
+                    dtype=self.dtype,
                 ).thinker.audio_tower
                 self.model = audio_tower.to(self.device)
                 self.processor = Qwen2_5OmniProcessor.from_pretrained(

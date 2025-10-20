@@ -54,16 +54,40 @@ def get_parser() -> argparse.ArgumentParser:
     # Data configuration
     data_group = parser.add_argument_group("Data Configuration")
     data_group.add_argument(
-        "--train-data",
+        "--train-unregistered-specifier",
         type=str,
+        default="",
         required=False,
-        help="Path to training data",
+        help="Unregistered train data specifier. "
+        "Format: 'task:name:data_json[:factor]' "
+        "(e.g., 'asr:librispeech:train.json:2.0')",
     )
     data_group.add_argument(
-        "--valid-data",
+        "--train-registered-specifier",
         type=str,
+        default="",
         required=False,
-        help="Path to validation data",
+        help="Registered train data specifier. "
+        "Format: 'task:name[:factor]' "
+        "(e.g., 'tts:ljspeech:1.5')",
+    )
+    data_group.add_argument(
+        "--valid-unregistered-specifier",
+        type=str,
+        default="",
+        required=False,
+        help="Unregistered validation data specifier. "
+        "Format: 'task:name:data_json[:factor]' "
+        "(e.g., 'asr:librispeech:valid.json')",
+    )
+    data_group.add_argument(
+        "--valid-registered-specifier",
+        type=str,
+        default="",
+        required=False,
+        help="Registered validation data specifier. "
+        "Format: 'task:name[:factor]' "
+        "(e.g., 'tts:ljspeech:1.0')",
     )
 
     # Logging configuration
