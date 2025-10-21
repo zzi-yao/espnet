@@ -13,11 +13,9 @@ import yaml
 import torch
 import deepspeed
 
-from espnet2.speechlm.configuration.speechlm_job import SpeechLMJobTemplate
+from espnet2.speechlm.template import JOB_TEMPLATES
+from espnet2.speechlm.dataloader.iterator import DataIteratorFactory
 
-JobTemplates = dict(
-    speechlm=SpeechLMJobTemplate,
-)
 
 def get_parser() -> argparse.ArgumentParser:
     """Build argument parser for training script."""
@@ -94,6 +92,12 @@ def get_parser() -> argparse.ArgumentParser:
         "Format: 'task:name[:factor]' "
         "(e.g., 'tts:ljspeech:1.0')",
     )
+    data_group.add_argument(
+        "--stats-dir",
+        type=Path,
+        required=True,
+        help="The folder of length statistics",
+    )
 
     # Logging configuration
     log_group = parser.add_argument_group("Logging")
@@ -143,12 +147,54 @@ def main():
     logger.info(f"World size: {world_size}")
     logger.info(f"Output directory: {args.output_dir}")
 
-    # (3) Load training configuration
+    # (3) Initialize job template
     with open(args.train_config, 'r') as f:
         train_config = yaml.safe_load(f)
     logger.info(f"Loaded training config from: {args.train_config}")
 
-    # (4) Initialize job template, which build (1) model (2) collate_fn.
+    job_template_class = JOB_TEMPLATES[train_config['job_type']]
+    job_template = job_template_class(train_config)
 
+    # (4) build data iterator factory
+    loading_config = train_config['data_loading']
+    preprocessor = job_template.build_preprocessor()
+    
+    train_iterator_factory = DataIteratorFactory(
+        args.train_unregistered_specifier,
+        args.train_registered_specifier,
+        stats_dir=args.stats_dir,
+        loader_state=args.output_dir / "loader_state" / "train.json",
+        collate_fn=preprocessor.collate_fn,
+        batchfy_method=loading_config['batchfy_method'],
+        batch_size=loading_config['batch_size'],
+        num_workers=loading_config['num_workers'],
+        rank=rank,
+        world_size=world_size,
+        shuffle=True,
+        seed=loading_config['seed'],
+    )
+    
+
+    # valid_iterator_factory = DataIteratorFactory(
+    #     args.valid_unregistered_specifier,
+    #     args.valid_registered_specifier,
+    #     stats_dir=args.stats_dir,
+    #     loader_state=args.output_dir / "loader_state" / "valid.json",
+    #     collate_fn=preprocessor.collate_fn,
+    #     batchfy_method=loading_config['batchfy_method'],
+    #     batch_size=loading_config['batch_size'],
+    #     num_workers=loading_config['num_workers'],
+    #     rank=rank,
+    #     world_size=world_size,
+    #     shuffle=False,
+    #     seed=loading_config['seed'],
+    # )
+
+    # DEBUG: Test the data loading.
+    train_iterator = train_iterator_factory.get_iterator()
+    for batch in train_iterator:
+        print(batch)
+        assert 1 == 2
+    
 if __name__ == "__main__":
     main()

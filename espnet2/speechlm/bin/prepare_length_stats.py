@@ -64,6 +64,12 @@ def get_parser() -> argparse.ArgumentParser:
         help="Number of worker processes for data loading",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Random seed for reproducibility",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",

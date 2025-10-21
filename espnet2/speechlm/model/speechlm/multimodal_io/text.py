@@ -47,12 +47,11 @@ class HuggingFaceTextIO(AbsIO):
             add_special_tokens=True
         )
 
-        tokens = np.array(token_ids, dtype=np.int32)
+        tokens = np.array(token_ids, dtype=np.int32).reshape(-1, 1)
+        conti_feat = None
+        loss_mask = (tokens * 0 + 1).astype(np.float32)
 
-        return {
-            "data": tokens,
-            "length": len(tokens),
-        }
+        return tokens, conti_feat, loss_mask
 
     def decode(self, tokens: np.ndarray) -> str:
         """Decode a 1D tensor of token IDs to text string.

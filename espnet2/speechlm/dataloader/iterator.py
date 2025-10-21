@@ -68,8 +68,8 @@ class DataIteratorFactory:
         unregistered_specifier: str,
         registered_specifier: str,
         stats_dir: Union[str, Path] = None,
+        loader_state: Optional[Path] = None,
         collate_fn: Optional[Callable] = None,
-        loader_state: Optional[Dict] = None,
         batchfy_method: str = "bucket",
         batch_size: int = 1000,
         num_workers: int = 4,
@@ -131,7 +131,7 @@ class DataIteratorFactory:
                 # Accumulate all examples as individual batches
                 self.batched_examples.extend([[example] for example in data_list])
 
-        elif loader_state is None:
+        elif loader_state is None or not loader_state.exists():
             # (3) build all (task, dataset, example_id) for indexing
             all_subsets = dataset.get_all_examples()
             all_examples = list()

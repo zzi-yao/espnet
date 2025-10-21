@@ -584,6 +584,18 @@ class DiscreteAudioIO(AbsIO):
 
         return int(frame_length)
 
+    def preprocess(self, data: Tuple[np.ndarray, int]):
+
+        wav, _ = data
+        length = self.find_length(data)
+        
+        ones = np.ones((length, self.num_stream())).astype(np.int32)
+        paddings = ones * 0
+        conti_feat = (length, wav)
+        loss_mask = ones * np.array(self.stream_weights).reshape(1, -1)
+
+        return paddings, conti_feat, loss_mask
+
     def num_stream(self) -> Optional[int]:
         """Get number of parallel streams (SSL + codec).
 
@@ -782,7 +794,32 @@ class ContinuousAudioIO(AbsIO):
             )
 
     def preprocess(self, data: np.ndarray) -> Dict[str, np.ndarray]:
-        return data
+        wav, fs = data
+        if fs != self.sample_rate:
+            raise ValueError("Imcompatible sampling rate")
+        
+        if wav.shape[0] != 1:
+            raise ValueError("Only support single-channel audio")
+        wav = wav[0]
+
+        if wav.shape[0] > self.n_samples:
+            raise ValueError("Input audio is too long to process")
+        
+        print(wav, wav.shape)
+        
+        feat = self.processor(
+            [wav],
+            truncation=False, 
+            return_tensors='np',
+            do_normalize=True,
+            return_token_stamps=True,
+            sampling_rate=self.sample_rate
+        )['input_features'][0]
+
+        length = self.find_length(data)
+        paddings = np.zeros((length, 1)).astype(np.int32)
+
+        return paddings, (length, feat), paddings
     
     def encode_batch(self, batch_data) -> Dict:
         """Encode batch data (not implemented for continuous audio).
