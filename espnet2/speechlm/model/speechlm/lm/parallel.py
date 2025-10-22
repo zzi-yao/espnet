@@ -3,6 +3,7 @@ import torch.nn as nn
 import transformers
 from transformers import AutoConfig
 
+from espnet2.speechlm.model.speechlm.loss import multi_stream_ce_loss
 
 def ParallelHFModel(model_hf_tag, **kwargs):
     model_class = build_parallel_hf_class(model_hf_tag)
@@ -22,6 +23,7 @@ def build_parallel_hf_class(model_hf_tag):
             pretrained_model_name_or_path,
             multimodal_io,
             vocab_interval,
+            max_loss_interval: int = 13192,
             **kwargs,
         ):
             # (1) Load the base model using parent's from_pretrained
@@ -78,7 +80,6 @@ def build_parallel_hf_class(model_hf_tag):
             model.stream_emb = nn.Embedding(model.num_stream, embed_dim)
 
             # (4) multimodal IO
-            model.vocab_interval = vocab_interval
             model.multimodal_io_dict = nn.ModuleDict(multimodal_io)
             model.adaptor = nn.ModuleDict()
             for io_name, io in model.multimodal_io_dict.items():
@@ -86,58 +87,118 @@ def build_parallel_hf_class(model_hf_tag):
                     model.adaptor[io_name] = nn.Linear(
                         io.feature_dim(), model.config.hidden_size,
                     )
+            
+            # (5) loss computing interval
+            loss_intervals = list()
+            for io_name, vocab_intervals in vocab_interval.items():
+                if io_name == "text": # text is always in the first stream
+                    continue
+                
+                cur_start, _ = vocab_intervals[0]
+                for _, end in vocab_intervals[1:]:
+                    if end - cur_start <= max_loss_interval:
+                        continue
+                    else:
+                        loss_intervals.append((cur_start, end))
+                        cur_start = end
+                loss_intervals.append((cur_start, end))
 
             return model
 
-        def encode(
-            self, input_ids, position_ids, use_cache=False, past_key_value=None
-        ):
-            assert input_ids.dim() == 3
+        def forward(self, **kwargs):
+            """ Forward without loss computing """
+            input_ids = kwargs['seqs']
+            conti_feats = kwargs['conti_feats']
+            loss_mask = kwargs.get("loss_masks", None)
+            position_ids = kwargs.get("position_ids", None)
+            past_key_values = kwargs.get("past_key_values", None)
 
-            inputs_embeds = self.model.embed_tokens(input_ids).sum(dim=2)
-
-            # TODO(Jinchuan) add continuous feature
-            output = super(ParallelLLM, self).forward(
-                inputs_embeds=inputs_embeds,
-                position_ids=position_ids,
-                use_cache=use_cache,
-                past_key_value=past_key_value,
-            )
-
-            stream_emb = self.stream_emb.weight
-            stream_emb[0] = 0.0
-            output = output.unsqueeze(2) + stream_emb.tile(1, 1, 1, 1)
-
-            return output.last_hidden_state, output.past_key_value
-        
-        def forward(
-            self, input_ids, position_ids, use_cache=False, past_key_value=None
-        ):
+            input_embeds = self._embed(input_ids, conti_feats)
             
-            last_hidden_state, _ = self.encode(
-                input_ids, position_ids, use_cache, past_key_value
+            output = super().forward(
+                input_embeds=input_embeds,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=past_key_values is not None
             )
 
-            loss, stats = self._compute_loss(last_hidden_state, input_ids)
+            last_hidden_states = output.last_hidden_states.unsqueeze(2)
+            stream_emb = self.stream_emb.weight.tile(1, 1, 1, 1)
+            last_hidden_states[:, :, 1:] = last_hidden_states[:, :, 1:] + stream_emb[:, :, 1:]
 
-            return loss, stats
-        
-        def _compute_loss(self, hidden_states, input_ids):
-            raise NotImplementedError
-        
-        def multimodal_forward(self, hidden_stats, conti_feats):
-            raise NotImplementedError
-        
-        def register_multimodal_io(self, multimodal_io_dict):
-            self.multimodal_io_dict = nn.ModuleDict(multimodal_io_dict)
-            self.adaptor = nn.ModuleDict()
-            for io_name, io in self.multimodal_io_dict.items():
-                if not io.is_discrete:
-                    self.adaptor[io_name] = nn.Linear(
-                        io.feature_dim(), self.config.hidden_size,
-                    )
+            if loss_mask is not None:
+                loss, stats = multi_stream_ce_loss(
+                    input_ids=input_ids,
+                    last_hidden_states=last_hidden_states
+                )
 
-        def inference(self):
-            raise NotImplementedError
+        def _embed(self, input_ids, conti_feats):
+
+            # (1) On-the-fly discrete tokens
+            for io_name, (io_index, io_feat) in conti_feats.items():
+                if not self.multimodal_io_dict[io_name].is_discrete:
+                    continue
+                codes = self.multimodal_io_dict[io_name]
+                for code, (bidx, start, length) in zip(codes, io_index):
+                    input_ids[bidx, start: length] = code[:length]
+            
+            # (2) embeddings
+            input_embeds = self.model.embed_tokens(input_ids)
+
+            # (3) On-the-fly continuous features
+            for io_name, (io_index, io_feat) in conti_feats.items():
+                if self.multimodal_io_dict[io_name].is_discrete:
+                    continue
+                feats = self.multimodal_io_dict[io_name]
+                for feat, (bidx, start, length) in zip(feats, io_index):
+                    input_embeds[bidx, start: length] = feat[:length]
+            
+            return input_embeds
+        
+        def _loss(self, last_hidden_stats, input_ids, loss_mask):
+            
+
+
+        # def encode(
+        #     self, input_ids, position_ids, use_cache=False, past_key_value=None
+        # ):
+        #     assert input_ids.dim() == 3
+
+        #     inputs_embeds = self.model.embed_tokens(input_ids).sum(dim=2)
+
+        #     # TODO(Jinchuan) add continuous feature
+        #     output = super(ParallelLLM, self).forward(
+        #         inputs_embeds=inputs_embeds,
+        #         position_ids=position_ids,
+        #         use_cache=use_cache,
+        #         past_key_value=past_key_value,
+        #     )
+
+        #     stream_emb = self.stream_emb.weight
+        #     stream_emb[0] = 0.0
+        #     output = output.unsqueeze(2) + stream_emb.tile(1, 1, 1, 1)
+
+        #     return output.last_hidden_state, output.past_key_value
+        
+        # def forward(
+        #     self, input_ids, position_ids, use_cache=False, past_key_value=None
+        # ):
+            
+        #     last_hidden_state, _ = self.encode(
+        #         input_ids, position_ids, use_cache, past_key_value
+        #     )
+
+        #     loss, stats = self._compute_loss(last_hidden_state, input_ids)
+
+        #     return loss, stats
+        
+        # def _compute_loss(self, hidden_states, input_ids):
+        #     raise NotImplementedError
+        
+        # def multimodal_forward(self, hidden_stats, conti_feats):
+        #     raise NotImplementedError
+
+        # def inference(self):
+        #     raise NotImplementedError
 
     return ParallelLLM

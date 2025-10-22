@@ -407,15 +407,10 @@ class DiscreteAudioIO(AbsIO):
                     codes[..., stream_idx],
                 )
 
-        # Apply delay interleaving if enabled
         if self.delay_interleave:
             codes = self._apply_delay_interleave(codes)
-            # Update frame lengths for interleaved output
-            output_frame_length = frame_length + self.num_stream() - 1
-        else:
-            output_frame_length = frame_length
 
-        return codes, output_frame_length
+        return codes
 
     def decode_batch(
         self, codes: torch.Tensor, lengths: torch.Tensor
