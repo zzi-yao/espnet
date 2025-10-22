@@ -4,7 +4,7 @@
 from typing import Any, Callable, Dict
 import yaml
 import re
-import torch.nn as nn
+import torch
 import numpy as np
 
 from espnet2.speechlm.model.abs_job import AbsJobTemplate
@@ -113,7 +113,7 @@ class SpeechLMJobTemplate(AbsJobTemplate):
             loss_region=processor_config['loss_region'],
         )
 
-    def build_model(self) -> nn.Module:
+    def build_model(self) -> torch.nn.Module:
         """Build the SpeechLM model.
 
         Returns:
@@ -178,13 +178,13 @@ class SpeechLMPreprocessor:
         return length
 
     def collate_fn(self, data_lst):
-        data_lst = [
+        data_dicts = [
             self.preprocessing(key, data_dict)
             for key, data_dict in data_lst
         ]
         
         seqs, conti_feats, loss_masks = [], [], []
-        for bidx, data_dict in enumerate(data_lst):
+        for bidx, data_dict in enumerate(data_dicts):
             seqs.append(data_dict['sequence'])
             # conti_feats.append((bidx, data_dict['conti_feats']))
             loss_masks.append(data_dict['loss_mask'])
@@ -206,8 +206,14 @@ class SpeechLMPreprocessor:
         
         for io_dict in conti_feats_dict.values():
             io_dict[1], _ = pad_list(io_dict[1])
-        
+            io_dict[1] = torch.Tensor(io_dict[1])
+
+        seqs = torch.Tensor(seqs).long()
+        loss_mask = torch.Tensor(loss_mask).float()
+        keys = [key for key, _ in data_lst]
+
         return {
+            "key": keys,
             "seqs": seqs,
             "conti_feats": conti_feats_dict,
             "loss_masks": loss_masks

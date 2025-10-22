@@ -12,9 +12,11 @@ import yaml
 
 import torch
 import deepspeed
+import wandb
 
 from espnet2.speechlm.model import _all_job_types
 from espnet2.speechlm.dataloader.iterator import DataIteratorFactory
+from espnet2.speechlm.trainer.deepspeed_trainer import DeepSpeedTrainer
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -38,7 +40,7 @@ def get_parser() -> argparse.ArgumentParser:
     train_group.add_argument(
         "--train-config",
         type=Path,
-        required=False,
+        required=True,
         help="Path to training configuration file",
     )
     train_group.add_argument(
@@ -48,7 +50,7 @@ def get_parser() -> argparse.ArgumentParser:
         help="Directory to save checkpoints and logs",
     )
     train_group.add_argument(
-        "--resume",
+        "--resume_path",
         type=Path,
         default=None,
         help="Path to checkpoint to resume training from",
@@ -109,6 +111,22 @@ def get_parser() -> argparse.ArgumentParser:
         help="Logging level",
     )
 
+    # Wandb configuration (mandatory local/offline logging)
+    wandb_group = parser.add_argument_group("Weights & Biases (Mandatory Local Logging)")
+    wandb_group.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Run name for wandb (defaults to output dir name)",
+    )
+    wandb_group.add_argument(
+        "--wandb-tags",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Tags for organizing runs (e.g., baseline, v2, ablation)",
+    )
+
     return parser
 
 
@@ -142,10 +160,11 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
-    # Now we can log freely - only rank 0 will show INFO messages
     logger.info(f"Distributed training initialized")
     logger.info(f"World size: {world_size}")
     logger.info(f"Output directory: {args.output_dir}")
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # (3) Initialize job template
     with open(args.train_config, 'r') as f:
@@ -158,12 +177,16 @@ def main():
     # (4) build data iterator factory
     loading_config = train_config['data_loading']
     preprocessor = job_template.build_preprocessor()
-    
+
+    # Ensure loader_state directory exists
+    loader_state_dir = args.output_dir / "loader_state"
+    loader_state_dir.mkdir(parents=True, exist_ok=True)
+
     train_iterator_factory = DataIteratorFactory(
         args.train_unregistered_specifier,
         args.train_registered_specifier,
         stats_dir=args.stats_dir,
-        loader_state=args.output_dir / "loader_state" / "train.json",
+        loader_state=loader_state_dir / "train.json",
         collate_fn=preprocessor.collate_fn,
         batchfy_method=loading_config['batchfy_method'],
         batch_size=loading_config['batch_size'],
@@ -174,27 +197,58 @@ def main():
         seed=loading_config['seed'],
     )
     
+    valid_iterator_factories = dict()
+    valid_iterator_args = dict(
+        stats_dir=args.stats_dir,
+        loader_state=loader_state_dir / "valid.json",
+        collate_fn=preprocessor.collate_fn,
+        batchfy_method=loading_config['batchfy_method'],
+        batch_size=loading_config['batch_size'],
+        num_workers=loading_config['num_workers'],
+        rank=rank,
+        world_size=world_size,
+        shuffle=False,
+    )
 
-    # valid_iterator_factory = DataIteratorFactory(
-    #     args.valid_unregistered_specifier,
-    #     args.valid_registered_specifier,
-    #     stats_dir=args.stats_dir,
-    #     loader_state=args.output_dir / "loader_state" / "valid.json",
-    #     collate_fn=preprocessor.collate_fn,
-    #     batchfy_method=loading_config['batchfy_method'],
-    #     batch_size=loading_config['batch_size'],
-    #     num_workers=loading_config['num_workers'],
-    #     rank=rank,
-    #     world_size=world_size,
-    #     shuffle=False,
-    #     seed=loading_config['seed'],
-    # )
+    for spec in args.valid_unregistered_specifier.split():
+        factory = DataIteratorFactory(unregistered_specifier=spec, **valid_iterator_args)
+        valid_iterator_factories[spec] = factory
+    for spec in args.valid_registered_specifier.split():
+        factory = DataIteratorFactory(registered_specifier=spec, **valid_iterator_args)
+        valid_iterator_factories[spec] = factory
 
-    # DEBUG: Test the data loading.
-    train_iterator = train_iterator_factory.get_iterator()
-    for batch in train_iterator:
-        print(batch)
-        assert 1 == 2
-    
+    # (5) build model
+    model = job_template.build_model()
+
+    # (6) Initialize wandb (mandatory, always in offline mode)
+    wandb_argument_record = {
+        "train_args": vars(args),
+        "train_config": train_config,
+    }
+
+    # Always use offline mode to keep data local
+    wandb_name = args.wandb_name or f"run_{args.output_dir.name}"
+    wandb.init(
+        mode='offline',
+        project='local',
+        name=wandb_name,
+        config=wandb_argument_record,
+        tags=args.wandb_tags,
+        dir=str(args.output_dir),
+        resume="auto",
+    )
+    logger.info(f"wandb initialization: name={wandb_name}")
+
+    # (7) Initialize DeepSpeed trainer and train
+    trainer = DeepSpeedTrainer(
+        train_data_factory=train_iterator_factory,
+        valid_data_factories=valid_iterator_factories,
+        model=model,
+        resume_path=args.resume_path,
+        output_dir=args.output_dir,
+        trainer_args=train_config['trainer'],
+    )
+    trainer.run()
+
 if __name__ == "__main__":
     main()
