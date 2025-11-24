@@ -1,6 +1,6 @@
 # Set the path of your corpus
 # "downloads" means the corpus can be downloaded by the recipe automatically
-
+CDSD=/home/q/Downloads/CDSD
 ACCENTED_FR=downloads
 ACCENT_DB=
 ACESINGER=downloads
