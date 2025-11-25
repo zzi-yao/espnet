@@ -49,7 +49,7 @@ fi
     
 #     local/download_and_untar.sh ${CDSD}/CDSD-Interspeech.zip ${CDSD}
 # fi
-
+# CDSD="/root/shared-data/zhangxiaoqing-data/CDSD"
 #  执行数据准备
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     echo "Data preparation"

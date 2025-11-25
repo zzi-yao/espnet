@@ -9,6 +9,7 @@ fin = open(sys.argv[1], "r")
 #fout_text = open(sys.argv[2], "w")
 fout_utt2spk = open(sys.argv[3], "w")
 preprocess_input_dir = "/home/q/Downloads/CDSD/CDSD-Interspeech/after_catting/1h/text"
+# preprocess_input_dir = "/root/shared-data/zhangxiaoqing-data/CDSD/CDSD-Interspeech/after_catting/1h/text"
 fout_text = open(sys.argv[2],"w")
 #text_text = open(sys.argv[4],"w")
 

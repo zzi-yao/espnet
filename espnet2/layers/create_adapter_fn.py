@@ -1,7 +1,10 @@
-from typing import List, Optional
+from typing import Dict, Tuple, List, Optional
 
 import torch
+import torch.nn as nn
+import math
 from typeguard import typechecked
+from torch import Tensor
 
 from espnet2.asr.frontend.s3prl import S3prlFrontend
 from espnet2.layers.create_adapter_utils import (
@@ -144,11 +147,11 @@ def create_lora_adapter(
         raise ValueError(
             f"Target modules {target_modules} not found in the base model."
         )
-
+    lora.mark_only_lora_as_trainable(model=model,bias=bias_type)
     # Set the model (originally in train mode) to eval mode
     # This step can avoid merging LoRA weights again
     # when loading pre-trained checkpoints
-    model.eval()
+    # model.eval()
 
 
 @typechecked
@@ -242,6 +245,72 @@ def create_new_lora_module(
             r=rank,
             lora_alpha=alpha,
             lora_dropout=dropout_rate,
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
+@typechecked
+def create_vera_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+    shared_cache: Dict[Tuple[int, int], Tuple[Tensor, Tensor]] = {}
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if isinstance(target_module, nn.Linear) and not isinstance(target_module, lora.VeRALayer):
+            if (target_module.in_features, target_module.out_features) not in shared_cache:
+                shared_A = torch.empty(rank, target_module.in_features)
+                nn.init.kaiming_uniform_(shared_A, a=math.sqrt(5))
+                shared_B = torch.empty(target_module.out_features, rank)
+                nn.init.kaiming_uniform_(shared_B, a=math.sqrt(5))
+                shared_cache[(target_module.in_features, target_module.out_features)] = (shared_A, shared_B)
+            else:
+                shared_A, shared_B = shared_cache[(target_module.in_features, target_module.out_features)]
+            new_module = create_new_vera_module(
+                target_module, rank, alpha, dropout_rate, shared_A, shared_B
+            )
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+
+    lora.mark_only_vera_as_trainable(model,bias_type)
+@typechecked
+def create_new_vera_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float ,shared_A: torch.Tensor, shared_B: torch.Tensor,
+):
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Linear):
+        new_module = lora.VeRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            vera_alpha=alpha,
+            vera_dropout=dropout_rate,
+            shared_A=shared_A,
+            shared_B=shared_B,
         )
     else:
         raise ValueError(

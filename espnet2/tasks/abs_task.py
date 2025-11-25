@@ -715,7 +715,7 @@ class AbsTask(ABC):
             type=str,
             default="lora",
             help="Adapter Name",
-            choices=["lora", "houlsby"],
+            choices=["lora", "houlsby","vera"],
         )
         group.add_argument(
             "--save_strategy",

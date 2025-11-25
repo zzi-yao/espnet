@@ -230,6 +230,8 @@ class Trainer:
                 print("Error: S3PRL is not properly installed.")
                 print("Please install S3PRL: cd ${MAIN_ROOT}/tools && make s3prl.done")
                 raise RuntimeError("Requiring S3PRL. ")
+            elif adapter == "vera" and lora is None:
+                raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
 
         if trainer_options.resume and (output_dir / "checkpoint.pth").exists():
             cls.resume(
@@ -414,6 +416,8 @@ class Trainer:
                                 for k, v in model_state_dict.items()
                                 if "adapter" in k
                             }
+                        elif adapter == "vera":
+                            model_state_dict = lora.vera_state_dict(model)
                         else:
                             raise ValueError(f"Adapter type {adapter} not supported")
                     else:  # save_strategy == "required_grad_only"

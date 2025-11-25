@@ -26,6 +26,7 @@ inference_config=conf/whisper_decode_asr.yaml
     --nj 2 \
     --token_type whisper_multilingual \
     --inference_nj 4 \
+    --gpu_inference true \
     --nbpe 5000 \
     --feats_normalize "" \
     --max_wav_duration 30 \
