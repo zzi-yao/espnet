@@ -16,7 +16,7 @@ asr_config=conf/tuning/train_asr_whisper_small_lora.yaml
 inference_config=conf/whisper_decode_asr.yaml
 
 ./asr.sh \
-    --stage 10 \
+    --stage 11 \
     --stop_stage 13 \
     --skip_data_prep false \
     --skip_train false \
