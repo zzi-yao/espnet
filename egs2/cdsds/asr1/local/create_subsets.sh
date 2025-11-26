@@ -5,24 +5,23 @@
 
 data=$1     # data transformed into kaldi format
 echo "First argument (\$1): $1"
-# Check if the data directory exists
 if [ -d ${data} ];then
     # Generate a list of all wav files
     cat $data/data_all/wav.scp > $data/all.scp
 
-    # Split the data into training, validation, and test sets
-    # Assume 80% for training, 10% for validation, and 10% for test
-    total_lines=$(wc -l < $data/all.scp)
-    train_lines=$((total_lines * 80 / 100))
-    valid_lines=$((total_lines * 10 / 100))
-    test_lines=$((total_lines - train_lines - valid_lines))
+    # 1. 抽取 test 集：每隔 10 行取 1 行（第 10, 20, 30, ... 行）
+    # 使用 awk 实现间隔采样，NR 表示行号，NR % 10 == 0 表示行号能被 10 整除
+    awk 'NR % 10 == 0' $data/all.scp > $data/test.scp
 
-    # Extract the first part for training
-    head -n $train_lines $data/all.scp > $data/train.scp
-    # Extract the next part for validation
-    sed -n "$((train_lines+1)),$((train_lines+valid_lines))p" $data/all.scp > $data/valid.scp
-    # Extract the remaining part for test
-    tail -n $test_lines $data/all.scp > $data/test.scp
+    # 2. 从 all.scp 中排除 test 集，得到剩余数据（用于后续划分 train 和 valid）
+    ./utils/filter_scp.pl --exclude $data/test.scp $data/all.scp > $data/remaining.scp
+
+    # 3. 从 remaining.scp 中抽取 valid 集：每隔 10 行取 1 行
+    # 注意：此时 remaining.scp 的行号已经重新排列，直接对其进行间隔采样即可
+    awk 'NR % 10 == 0' $data/remaining.scp > $data/valid.scp
+
+    # 4. 从 remaining.scp 中排除 valid 集，得到最终的 train 集
+    ./utils/filter_scp.pl --exclude $data/valid.scp $data/remaining.scp > $data/train.scp
 
     # Create the corresponding data directories
     ./utils/subset_data_dir.sh --utt-list $data/train.scp $data/data_all $data/train
