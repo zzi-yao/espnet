@@ -523,11 +523,7 @@ class Speech2Text:
 
         # a. To device
         batch = to_device(batch, device=self.device)
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.asr_model.to(device)
-        batch = {key: value.to(device) for key, value in batch.items() if isinstance(value, torch.Tensor)}
-        model_device = next(self.asr_model.parameters()).device
-        
+
         # b. Forward Encoder
         enc, enc_olens = self.asr_model.encode(**batch)
         if self.multi_asr:

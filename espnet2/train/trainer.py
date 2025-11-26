@@ -152,7 +152,7 @@ class Trainer:
         reporter: Reporter,
         optimizers: Sequence[torch.optim.Optimizer],
         schedulers: Sequence[Optional[AbsScheduler]],
-        scaler: Optional[GradScaler],
+        scaler: Optional[GradScaler], # type: ignore
         ngpu: int = 0,
         strict: bool = True,
     ):
@@ -556,7 +556,7 @@ class Trainer:
         iterator: Iterable[Tuple[List[str], Dict[str, torch.Tensor]]],
         optimizers: Sequence[torch.optim.Optimizer],
         schedulers: Sequence[Optional[AbsScheduler]],
-        scaler: Optional[GradScaler],
+        scaler: Optional[GradScaler], # type: ignore
         reporter: SubReporter,
         summary_writer,
         options: TrainerOptions,

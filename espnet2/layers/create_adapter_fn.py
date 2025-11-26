@@ -147,7 +147,7 @@ def create_lora_adapter(
         raise ValueError(
             f"Target modules {target_modules} not found in the base model."
         )
-    lora.mark_only_lora_as_trainable(model=model,bias=bias_type)
+    lora.mark_only_lora_as_trainable(model,bias_type)
     # Set the model (originally in train mode) to eval mode
     # This step can avoid merging LoRA weights again
     # when loading pre-trained checkpoints

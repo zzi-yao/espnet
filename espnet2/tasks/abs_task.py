@@ -33,6 +33,7 @@ from espnet2.iterators.sequence_iter_factory import SequenceIterFactory
 from espnet2.layers.create_adapter import create_adapter
 from espnet2.main_funcs.collect_stats import collect_stats
 from espnet2.optimizers.optim_groups import configure_optimizer
+from espnet2.optimizers.loraplus import create_loraplus_optimizer
 from espnet2.optimizers.sgd import SGD
 from espnet2.samplers.build_batch_sampler import (
     BATCH_TYPES,
@@ -145,7 +146,7 @@ try:
 except ImportError:
     pass
 try:
-    import apex
+    import apex # type: ignore
 
     optim_classes.update(
         fusedadam=apex.optimizers.FusedAdam,
@@ -1053,6 +1054,13 @@ class AbsTask(ABC):
             "e.g., 'bias_weight_decay': False will set zero weight decay for bias "
             "params. See also espnet2.optimizers.optim_groups.configure_optimizer.",
         )
+        group.add_argument(
+            "--loraplus_lr_ratio",
+            type=float,
+            default=10.0,
+            help="The ratio of learning rate for LoraPlus optimizer. "
+            "This is the ratio ηB/ηA where ηA (lr) is the optimizer learning rate.",
+        )
         for i in range(1, cls.num_optimizers + 1):
             suf = "" if i == 1 else str(i)
             group.add_argument(
@@ -1117,7 +1125,12 @@ class AbsTask(ABC):
                 )
             else:
                 optim = optim_class(model.parameters(), **args.optim_conf)
-
+                # loraplus_lr_ratio = args.optim_conf.get('loraplus_lr_ratio', 16.0)
+                # optim = create_loraplus_optimizer(
+                #     model=model,
+                #     optimizer_cls=optim_class,
+                #     **args.optim_conf
+                # )
         optimizers = [optim]
         return optimizers
 
