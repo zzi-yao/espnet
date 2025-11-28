@@ -389,3 +389,120 @@ class VeRALinear(nn.Linear, VeRALayer):
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
+
+class MeLoRALayer():
+    def __init__(self, r: int, 
+        melora_alpha: int, 
+        melora_dropout: float,
+        merge_weights: bool, 
+        n:int, ):
+        self.n = n
+        self.merge_weights = merge_weights
+        self.melora_alpha = melora_alpha
+        self.r = r
+
+        if melora_dropout > 0.:
+            self.melora_dropout = nn.Dropout(p=melora_dropout)
+        else:
+            self.melora_dropout = lambda x: x
+        self.merged = False
+        self.merge_weights = merge_weights
+class MeLinear(nn.Linear, MeLoRALayer):
+    # LoRA implemented in a dense layer
+    def __init__(
+        self, 
+        in_features: int, 
+        out_features: int, 
+        r: int = 0, 
+        melora_alpha: int = 1, 
+        melora_dropout: float = 0.,
+        fan_in_fan_out: bool = False, # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
+        merge_weights: bool = True,
+        n: int = 1,  # 新增参数，表示 MeLoRA 的小模块数量
+        **kwargs
+    ):
+        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        MeLoRALayer.__init__(self, r=r, melora_alpha=melora_alpha, melora_dropout=melora_dropout,
+                           merge_weights=merge_weights, n=n)
+        self.fan_in_fan_out = fan_in_fan_out
+        self.r_per_module = r // n
+        self.in_features_per_module = in_features // n
+        self.out_features_per_module = out_features // n
+
+        if r > 0:
+            # 创建 n 个小 LoRA 模块
+            self.melora_A_list = nn.ParameterList([
+                nn.Parameter(torch.empty(self.r_per_module, self.in_features_per_module, requires_grad=True))
+                for _ in range(n)
+            ])
+            self.melora_B_list = nn.ParameterList([
+                nn.Parameter(torch.empty(self.out_features_per_module, self.r_per_module, requires_grad=True))
+                for _ in range(n)
+            ])
+            # self.scaling = self.r / self.n
+            self.scaling = self.melora_alpha / self.r
+            self.weight.requires_grad = False
+        self.reset_parameters()
+        if fan_in_fan_out:
+            self.weight.data = self.weight.data.transpose(0, 1)
+
+
+    def reset_parameters(self):
+        nn.Linear.reset_parameters(self)
+        if hasattr(self, 'melora_A_list') and hasattr(self, 'melora_B_list'):
+            for A, B in zip(self.melora_A_list, self.melora_B_list):
+                #nn.init.normal_(A, mean=0, std=0.02)
+                nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+                nn.init.zeros_(B)
+
+
+    def train(self, mode: bool = True):
+        def T(w):
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
+        nn.Linear.train(self, mode)
+        if mode:
+            if self.merge_weights and self.merged:
+                if self.r > 0:
+                    for i in range(self.n):
+                        Ai = self.melora_A_list[i]
+                        Bi = self.melora_B_list[i]
+                        melora_weight = T(Bi @ Ai)
+                        self.weight.data[i * self.out_features_per_module:(i + 1) * self.out_features_per_module,
+                                         i * self.in_features_per_module:(i + 1) * self.in_features_per_module] -= melora_weight * self.scaling
+                    self.merged = False
+        else:
+            if self.merge_weights and not self.merged:
+                if self.r > 0:
+                    # 创建一个与 self.weight 形状相同的零张量
+                    weight_update = torch.zeros_like(self.weight)
+            
+                    for i in range(self.n):
+                        Ai = self.melora_A_list[i]
+                        Bi = self.melora_B_list[i]
+                        # 计算每个 LoRA 模块的权重贡献
+                        melora_weight = T(Bi @ Ai)
+                        # 将权重贡献加到相应的位置
+                        weight_update[i * self.out_features_per_module:(i + 1) * self.out_features_per_module,
+                                      i * self.in_features_per_module:(i + 1) * self.in_features_per_module] += melora_weight * self.scaling
+            
+                    # 将扩展后的权重加到 self.weight 上
+                    self.weight.data += weight_update
+                    self.merged = True
+
+    def forward(self, x: torch.Tensor):
+        def T(w):
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
+
+        if len(self.melora_A_list) > 0 and len(self.melora_B_list) > 0:
+            x_split = x.chunk(self.n, dim=-1)  # 按最后一维均分输入
+            outputs = []
+            for i in range(self.n):
+                xi = x_split[i]
+                Ai = self.melora_A_list[i]
+                Bi = self.melora_B_list[i]
+                outputs.append(xi @ Ai.T @ Bi.T)
+            lora_out = torch.cat(outputs, dim=-1) * self.scaling
+            lora_out = self.melora_dropout(lora_out)
+            return F.linear(x, T(self.weight), bias=self.bias) + lora_out
+        else:
+            return F.linear(x, T(self.weight), bias=self.bias)        

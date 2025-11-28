@@ -71,4 +71,4 @@ adapter_conf:
     rank: 16  #8
     alpha: 32    #16
     dropout_rate: 0.05
-    target_modules: ["query", "key", "value", "attn.out"]
+    target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]

@@ -9,10 +9,10 @@ set -o pipefail
 
 train_set="train"
 valid_set="valid"
-test_sets="test"
-#test_sets="test valid"
+# test_sets="test"
+test_sets="test valid"
 
-asr_config=conf/tuning/train_asr_whisper_small_lora.yaml
+asr_config=conf/tuning/train_asr_whisper_small_melora.yaml
 inference_config=conf/whisper_decode_asr.yaml
 
 ./asr.sh \

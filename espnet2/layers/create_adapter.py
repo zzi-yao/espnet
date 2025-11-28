@@ -11,12 +11,13 @@ References:
 import torch
 from typeguard import typechecked
 
-from espnet2.layers.create_adapter_fn import create_houlsby_adapter, create_lora_adapter, create_vera_adapter
+from espnet2.layers.create_adapter_fn import create_houlsby_adapter, create_lora_adapter, create_vera_adapter, create_melora_adapter
 
 create_adapter_fn_table = {
     "lora": create_lora_adapter,
     "houlsby": create_houlsby_adapter,
     "vera": create_vera_adapter,
+    "melora": create_melora_adapter,
 }
 
 

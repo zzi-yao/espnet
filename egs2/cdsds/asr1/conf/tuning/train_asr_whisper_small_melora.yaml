@@ -34,7 +34,7 @@ num_workers: 4
 sort_in_batch: descending       # how to sort data in making batch
 sort_batch: descending          # how to sort created batches
 batch_type: folded
-batch_size: 12
+batch_size: 10  # 12
 accum_grad: 1
 max_epoch: 7
 patience: none
@@ -52,24 +52,23 @@ cudnn_benchmark: false
 optim: adamw
 grad_clip: 1.0
 optim_conf:
-    lr: 1.0e-04
+    lr: 1.0e-05
     weight_decay: 0.01
     betas:
     - 0.9
     - 0.99
     eps: 1.0e-06
-    loraplus_lr_ratio: 16.0  # 添加 LoraPlus 学习率比率
 scheduler: warmuplr
 scheduler_conf:
     warmup_steps: 1500
 
-
-# LoRA finetune related
 use_adapter: true
-adapter: lora
+adapter: melora  # 修改
 save_strategy: required_grad_only
 adapter_conf:
     rank: 16  #8
+    n: 4       # 小模块数量，根据需要调整
     alpha: 32    #16
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
+    

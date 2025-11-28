@@ -320,3 +320,67 @@ def create_new_vera_module(
         )
 
     return new_module
+@typechecked
+def create_melora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    n: int = 4,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    is_target_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+        is_target_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.MeLoRALayer):
+            new_module = create_new_melora_module(target_module, rank, n, alpha, dropout_rate)
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+    if not is_target_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_melora_as_trainable(model,bias_type)
+@typechecked    
+def create_new_melora_module(
+    target_module: torch.nn.Module,
+    rank: int,
+    n: int,
+    alpha: int,
+    dropout_rate: float,
+):
+    """Create a new MeLoRA module."""
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+    if isinstance(target_module, torch.nn.Embedding):
+        print(f"embedding")
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            melora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.MeLinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            melora_alpha=alpha,
+            melora_dropout=dropout_rate,
+            n=n,
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
