@@ -384,3 +384,75 @@ def create_new_melora_module(
         )
 
     return new_module
+@typechecked
+def create_moelora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    expert_num: int = 4,
+    gate_temp: float = 6.0,
+    gate_hidden_dim: int = 64,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.LoRALayer):
+            new_module = create_moelora_module(
+                target_module, rank, alpha, dropout_rate,expert_num,gate_temp,gate_hidden_dim
+            )
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_moelora_as_trainable(model,bias_type)
+@typechecked
+def create_moelora_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,expert_num: int = 4,
+    gate_temp: float = 6.0,
+    gate_hidden_dim: int = 64,
+):
+    """Create a new lora module for the given target module."""
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Embedding):
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            lora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.MoELoRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout_rate,
+            expert_num=expert_num,      
+            gate_temp=gate_temp,   
+            gate_hidden_dim=gate_hidden_dim,
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module

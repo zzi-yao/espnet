@@ -234,6 +234,8 @@ class Trainer:
                 raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
             elif adapter == "melora" and lora is None:
                 raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
+            elif adapter == "moelora" and lora is None:
+                raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
 
         if trainer_options.resume and (output_dir / "checkpoint.pth").exists():
             cls.resume(
@@ -422,6 +424,8 @@ class Trainer:
                             model_state_dict = lora.vera_state_dict(model)
                         elif adapter == "melora":
                             model_state_dict = lora.melora_state_dict(model)
+                        elif adapter == "moelora":
+                            model_state_dict = lora.moelora_state_dict(model)
                         else:
                             raise ValueError(f"Adapter type {adapter} not supported")
                     else:  # save_strategy == "required_grad_only"

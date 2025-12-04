@@ -440,7 +440,7 @@ class MeLinear(nn.Linear, MeLoRALayer):
                 for _ in range(n)
             ])
             # self.scaling = self.r / self.n
-            self.scaling = self.melora_alpha / self.r
+            self.scaling = 2  #self.melora_alpha / self.r
             self.weight.requires_grad = False
         self.reset_parameters()
         if fan_in_fan_out:
@@ -493,7 +493,7 @@ class MeLinear(nn.Linear, MeLoRALayer):
         def T(w):
             return w.transpose(0, 1) if self.fan_in_fan_out else w
 
-        if len(self.melora_A_list) > 0 and len(self.melora_B_list) > 0:
+        if len(self.melora_A_list) > 0 and not self.merged:
             x_split = x.chunk(self.n, dim=-1)  # 按最后一维均分输入
             outputs = []
             for i in range(self.n):
@@ -505,4 +505,171 @@ class MeLinear(nn.Linear, MeLoRALayer):
             lora_out = self.melora_dropout(lora_out)
             return F.linear(x, T(self.weight), bias=self.bias) + lora_out
         else:
-            return F.linear(x, T(self.weight), bias=self.bias)        
+            return F.linear(x, T(self.weight), bias=self.bias)      
+
+  # 单任务版MoELoRA（无任务嵌入/任务ID，数据驱动门控）
+class MoELoRALinear(nn.Linear, LoRALayer):
+    def __init__(
+        self,
+        in_features: int,          # 输入维度
+        out_features: int,         # 输出维度
+        r: int = 0,                # 总LoRA秩
+        lora_alpha: int = 1,       # LoRA alpha（缩放系数）
+        lora_dropout: float = 0.,  # Dropout率
+        expert_num: int = 4,       # 专家数量
+        gate_temp: float = 6.0,    # 门控Softmax温度系数（经验值）
+        gate_hidden_dim: int = 64, # 门控网络隐藏维度（数据驱动门控用）
+        fan_in_fan_out: bool = False,  # 权重存储格式（适配LLM）
+        merge_weights: bool = True,    # 是否合并权重
+        **kwargs
+    ):
+        # 初始化父类
+        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
+
+        # 原有属性保留
+        self.fan_in_fan_out = fan_in_fan_out
+
+        # MoELoRA核心参数（单任务版）
+        self.expert_num = expert_num
+        self.gate_temp = gate_temp
+        self.gate_hidden_dim = gate_hidden_dim
+
+        # 计算每个专家的秩（必须整除）
+        self.per_expert_r = r // expert_num if (r > 0 and expert_num > 0) else 0
+        if r > 0:
+            assert r % expert_num == 0, f"总秩r={r}必须能被专家数expert_num={expert_num}整除"
+            self.scaling = self.lora_alpha / self.r  # LoRA缩放系数（和原始LoRA一致）
+
+            # 1. 拆分LoRA A/B为多个专家（替代Expert类）
+            # A_e: 每个专家的A矩阵 → 维度 [per_expert_r, in_features]
+            self.lora_A = nn.ParameterList([
+                nn.Parameter(self.weight.new_zeros((self.per_expert_r, in_features)))
+                for _ in range(expert_num)
+            ])
+            # B_e: 每个专家的B矩阵 → 维度 [out_features, per_expert_r]
+            self.lora_B = nn.ParameterList([
+                nn.Parameter(self.weight.new_zeros((out_features, self.per_expert_r)))
+                for _ in range(expert_num)
+            ])
+
+            # 2. 数据驱动的门控网络（替代任务嵌入+门控，单任务场景）
+            # 门控网络：输入特征的全局统计 → 专家权重（无任务ID）
+            self.gate_mlp = nn.Sequential(
+                nn.Linear(in_features, gate_hidden_dim),  # 输入特征维度→隐藏维度
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, expert_num)    # 隐藏维度→专家权重
+            )
+
+            # 冻结预训练权重（只训练LoRA和门控）
+            self.weight.requires_grad = False
+        self.reset_parameters()
+        if fan_in_fan_out:
+            self.weight.data = self.weight.data.transpose(0, 1)  # 适配权重存储格式
+
+    def reset_parameters(self):
+        """重置参数:对齐原始LoRA的初始化逻辑"""
+        # 重置预训练Linear层参数
+        nn.Linear.reset_parameters(self)
+
+        # 初始化MoELoRA的专家矩阵（和原始LoRA一致）
+        if self.r > 0:
+            # A矩阵：kaiming_uniform初始化（原始LoRA逻辑）
+            for a in self.lora_A:
+                nn.init.kaiming_uniform_(a, a=math.sqrt(5))
+            # B矩阵：全0初始化（原始LoRA逻辑）
+            for b in self.lora_B:
+                nn.init.zeros_(b)
+            # 门控网络：xavier初始化
+            for m in self.gate_mlp:
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+    def _get_gate_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """数据驱动的门控权重计算（单任务场景核心）"""
+        # 计算输入特征的全局统计（均值池化，适配任意维度输入）
+        # x: [batch_size, ..., in_features] → [batch_size, in_features]
+        x_pooled = x.mean(dim=tuple(range(1, len(x.shape)-1)))  # 除了batch和最后一维，其余维度求均值
+        # 门控输出：[batch_size, expert_num] → Softmax归一化
+        gate_logits = self.gate_mlp(x_pooled) / self.gate_temp
+        gate_weights = F.softmax(gate_logits, dim=-1)
+        return gate_weights
+    def T(w):
+        return w.transpose(0, 1) if self.fan_in_fan_out else w
+    def train(self, mode: bool = True):
+        nn.Linear.train(self, mode)
+        if mode:
+            if self.merge_weights and self.merged:
+                self.unmerge()
+                self.merged = False
+        else:
+            # 评估模式：合并权重（如果未合并）
+            if self.merge_weights and not self.merged:
+                self.merge()
+                self.merged = True
+
+    def merge(self):
+        """合并MoELoRA权重到预训练权重(评估加速)"""
+        if self.r == 0:
+            return
+        # 单任务场景：用默认均值权重合并（或随机选一个样本的权重）
+        dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
+        gate_weights = self._get_gate_weights(dummy_x)  # [1, expert_num]
+        # 合并每个专家的LoRA增量
+        for e in range(self.expert_num):
+            delta_W = T(self.lora_B[e] @ self.lora_A[e])  # [out_features, in_features]
+            self.weight.data += delta_W * self.scaling * gate_weights[0, e]
+
+    def unmerge(self):
+        """解合并MoELoRA权重"""
+        if self.r == 0:
+            return
+        dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
+        gate_weights = self._get_gate_weights(dummy_x)  # [1, expert_num]
+        for e in range(self.expert_num):
+            delta_W = T(self.lora_B[e] @ self.lora_A[e])  # [out_features, in_features]
+            self.weight.data -= delta_W * self.scaling * gate_weights[0, e]
+    
+    def forward(self, x: torch.Tensor):
+        """
+        前向传播:单任务MoELoRA核心逻辑(无需task_id)
+        Args:
+            x: 输入特征 → [batch_size, ..., in_features]
+        """
+        # 1. 基础预训练Linear层输出
+        result = F.linear(x, self._transpose_weight(self.weight), bias=self.bias)
+
+        # 2. MoELoRA核心逻辑（仅当LoRA启用且未合并时生效）
+        if self.r > 0 and not self.merged:
+            # 2.1 LoRA Dropout（和原始LoRA一致）
+            x_dropout = self.lora_dropout(x)  # [batch_size, ..., in_features]
+            # 2.2 计算数据驱动的专家权重
+            gate_weights = self._get_gate_weights(x)  # [batch_size, expert_num]
+            # 2.3 展平输入维度（方便计算）
+            x_shape = x_dropout.shape
+            x_flat = x_dropout.reshape(-1, x_shape[-1])  # [total_tokens, in_features]
+            gate_weights_flat = gate_weights.repeat_interleave(
+                x_flat.shape[0] // gate_weights.shape[0], dim=0
+            )  # [total_tokens, expert_num]
+
+            
+
+            # 2.4 遍历每个专家计算LoRA输出，再加权求和（MoELoRA核心）
+            lora_output = 0.0
+            for e in range(self.expert_num):
+                # 专家A：x → [total_tokens, per_expert_r]
+                a_out = x_flat @ self.lora_A[e].T  # A_e.T: [in_features, per_expert_r]
+                # 专家B：a_out → [total_tokens, out_features]
+                b_out = a_out @ self.lora_B[e].T  # B_e.T: [per_expert_r, out_features]
+                # 乘以当前专家的权重 + LoRA缩放系数
+                b_out = b_out * self.scaling * gate_weights_flat[:, e: e+1]  # [total_tokens, out_features]
+                # 累加所有专家的输出
+                lora_output += b_out
+
+            # 2.5 恢复维度并叠加到基础输出
+            lora_output = lora_output.reshape(*x_shape[:-1], self.out_features)  # [batch_size, ..., out_features]
+            result += lora_output
+
+        return result

@@ -716,7 +716,7 @@ class AbsTask(ABC):
             type=str,
             default="lora",
             help="Adapter Name",
-            choices=["lora", "houlsby","vera","melora"],
+            choices=["lora", "houlsby","vera","melora","moelora"],
         )
         group.add_argument(
             "--save_strategy",
@@ -1124,13 +1124,13 @@ class AbsTask(ABC):
                     args.exclude_weight_decay_conf,
                 )
             else:
-                # optim = optim_class(model.parameters(), **args.optim_conf)
-                loraplus_lr_ratio = args.optim_conf.get('loraplus_lr_ratio', 16.0)
-                optim = create_loraplus_optimizer(
-                    model=model,
-                    optimizer_cls=optim_class,
-                    **args.optim_conf
-                )
+                optim = optim_class(model.parameters(), **args.optim_conf)
+                # loraplus_lr_ratio = args.optim_conf.get('loraplus_lr_ratio', 16.0)
+                # optim = create_loraplus_optimizer(
+                #     model=model,
+                #     optimizer_cls=optim_class,
+                #     **args.optim_conf
+                # )
         optimizers = [optim]
         return optimizers
 
