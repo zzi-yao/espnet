@@ -507,169 +507,285 @@ class MeLinear(nn.Linear, MeLoRALayer):
         else:
             return F.linear(x, T(self.weight), bias=self.bias)      
 
-  # 单任务版MoELoRA（无任务嵌入/任务ID，数据驱动门控）
+
 class MoELoRALinear(nn.Linear, LoRALayer):
     def __init__(
         self,
-        in_features: int,          # 输入维度
-        out_features: int,         # 输出维度
-        r: int = 0,                # 总LoRA秩
-        lora_alpha: int = 1,       # LoRA alpha（缩放系数）
-        lora_dropout: float = 0.,  # Dropout率
-        expert_num: int = 4,       # 专家数量
-        gate_temp: float = 6.0,    # 门控Softmax温度系数（经验值）
-        gate_hidden_dim: int = 64, # 门控网络隐藏维度（数据驱动门控用）
-        fan_in_fan_out: bool = False,  # 权重存储格式（适配LLM）
-        merge_weights: bool = True,    # 是否合并权重
+        in_features: int,          
+        out_features: int,         
+        r: int = 0,                
+        lora_alpha: int = 1,       
+        lora_dropout: float = 0.,  
+        expert_num: int = 4,       
+        gate_temp: float = 6.0,    
+        top_k: int = 2,  # 新增：默认k=2
+        fan_in_fan_out: bool = False,  
+        merge_weights: bool = True,    
+        load_balance_coeff: float = 0.005,   #0.01
         **kwargs
     ):
-        # 初始化父类
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
-
-        # 原有属性保留
         self.fan_in_fan_out = fan_in_fan_out
-
-        # MoELoRA核心参数（单任务版）
         self.expert_num = expert_num
         self.gate_temp = gate_temp
-        self.gate_hidden_dim = gate_hidden_dim
+        # 新增：保存top_k参数
+        self.top_k = top_k
+        self.load_balance_coeff = load_balance_coeff
+        self.load_balance_loss = torch.tensor(0.0, device=self.weight.device)
 
-        # 计算每个专家的秩（必须整除）
         self.per_expert_r = r // expert_num if (r > 0 and expert_num > 0) else 0
         if r > 0:
-            assert r % expert_num == 0, f"总秩r={r}必须能被专家数expert_num={expert_num}整除"
-            self.scaling = self.lora_alpha / self.r  # LoRA缩放系数（和原始LoRA一致）
-
-            # 1. 拆分LoRA A/B为多个专家（替代Expert类）
-            # A_e: 每个专家的A矩阵 → 维度 [per_expert_r, in_features]
+            assert r % expert_num == 0
+            self.scaling = self.lora_alpha / self.r  
             self.lora_A = nn.ParameterList([
                 nn.Parameter(self.weight.new_zeros((self.per_expert_r, in_features)))
-                for _ in range(expert_num)
+                for _ in range(self.expert_num)
             ])
-            # B_e: 每个专家的B矩阵 → 维度 [out_features, per_expert_r]
             self.lora_B = nn.ParameterList([
                 nn.Parameter(self.weight.new_zeros((out_features, self.per_expert_r)))
-                for _ in range(expert_num)
+                for _ in range(self.expert_num)
             ])
-
-            # 2. 数据驱动的门控网络（替代任务嵌入+门控，单任务场景）
-            # 门控网络：输入特征的全局统计 → 专家权重（无任务ID）
-            self.gate_mlp = nn.Sequential(
-                nn.Linear(in_features, gate_hidden_dim),  # 输入特征维度→隐藏维度
-                nn.ReLU(),
-                nn.Linear(gate_hidden_dim, expert_num)    # 隐藏维度→专家权重
-            )
-
-            # 冻结预训练权重（只训练LoRA和门控）
+            # self.gate_mlp = nn.Sequential(
+            #     nn.Linear(in_features, self.gate_hidden_dim),  
+            #     nn.ReLU(),
+            #     nn.Dropout(0.1),  # 新增dropout
+            #     nn.Linear(self.gate_hidden_dim, expert_num)    
+            # )
+            # 优化后（小样本专用）
+            # self.gate_mlp = nn.Sequential(
+            #     nn.Linear(in_features, self.expert_num, bias=False),  # 直接映射，无隐藏层
+            #     nn.Softmax(dim=-1)
+            # )g
+            self.gate_linear = nn.Linear(in_features, self.expert_num)  # 仅一层线性层
             self.weight.requires_grad = False
         self.reset_parameters()
         if fan_in_fan_out:
-            self.weight.data = self.weight.data.transpose(0, 1)  # 适配权重存储格式
+            self.weight.data = self.weight.data.transpose(0, 1)  
 
     def reset_parameters(self):
-        """重置参数:对齐原始LoRA的初始化逻辑"""
-        # 重置预训练Linear层参数
         nn.Linear.reset_parameters(self)
-
-        # 初始化MoELoRA的专家矩阵（和原始LoRA一致）
-        if self.r > 0:
-            # A矩阵：kaiming_uniform初始化（原始LoRA逻辑）
-            for a in self.lora_A:
-                nn.init.kaiming_uniform_(a, a=math.sqrt(5))
-            # B矩阵：全0初始化（原始LoRA逻辑）
-            for b in self.lora_B:
-                nn.init.zeros_(b)
-            # 门控网络：xavier初始化
-            for m in self.gate_mlp:
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
+        if hasattr(self, 'r') and self.r > 0:
+            if hasattr(self, 'lora_A') and hasattr(self, 'lora_B'):   # and hasattr(self, 'gate_mlp'):
+                # for a in self.lora_A:
+                #     nn.init.kaiming_uniform_(a, a=math.sqrt(5))
+                # for b in self.lora_B:
+                #     nn.init.zeros_(b)
+                # for e in range(self.expert_num):
+                #     # 不同专家用不同初始化种子
+                #     torch.manual_seed(42 + e)
+                #     nn.init.kaiming_uniform_(self.lora_A[e], a=math.sqrt(5) * (e+1))
+                #     nn.init.zeros_(self.lora_B[e])
+                # torch.manual_seed(torch.initial_seed())  # 恢复随机种子
+                base_coeff = math.sqrt(5) * 0.1  # 匹配语音特征±10的量级
+                noise_level = 1e-3                # 匹配差分特征±1的量级
+                param_clip = 0.05                # 语音特征的合理参数范围
+                for e in range(self.expert_num):
+                    seed = 42 + e * 100
+                    torch.manual_seed(seed)
+                    if self.expert_num == 2:
+                        if e == 0:
+                            nn.init.kaiming_uniform_(self.lora_A[e], a=base_coeff * 2)  # 稍大系数，增强鲁棒性
+                            nn.init.zeros_(self.lora_B[e])  # 无偏移，保证稳定性
+                        else:
+                            nn.init.kaiming_normal_(self.lora_A[e], a=base_coeff * 0.5)  # 小系数，聚焦细节
+                            noise = torch.randn_like(self.lora_A[e]) * noise_level
+                            self.lora_A[e].data = self.lora_A[e].data + noise
+                            nn.init.normal_(self.lora_B[e], mean=0, std=noise_level / 10)  # 更小的B层噪声      
+                    elif self.expert_num == 4:
+                        if e == 0:
+                            nn.init.kaiming_uniform_(self.lora_A[e], a=base_coeff * 2)
+                            nn.init.zeros_(self.lora_B[e])
+                        elif e == 1:
+                            nn.init.kaiming_normal_(self.lora_A[e], a=base_coeff * 0.5)
+                            noise = torch.randn_like(self.lora_A[e]) * noise_level
+                            self.lora_A[e].data = self.lora_A[e].data + noise
+                            nn.init.normal_(self.lora_B[e], mean=0, std=noise_level / 10)
+                        elif e == 2:
+                            nn.init.orthogonal_(self.lora_A[e], gain=0.1)  # 正交适配时序连续性
+                            nn.init.uniform_(self.lora_B[e], a=-noise_level/5, b=noise_level/5)
+                        else:
+                            nn.init.constant_(self.lora_A[e], val=0.01 * (e+1))  # 固定常数偏移
+                            noise = torch.randn_like(self.lora_A[e]) * noise_level * 2
+                            self.lora_A[e].data = self.lora_A[e].data + noise
+                            nn.init.constant_(self.lora_B[e], val=noise_level / 20)
+                    self.lora_A[e].data = self.lora_A[e].data.clamp(-param_clip, param_clip)
+                torch.manual_seed(torch.initial_seed())
+                # for m in self.gate_mlp:
+                #     if isinstance(m, nn.Linear):
+                #         nn.init.xavier_uniform_(m.weight, gain=0.1)  # 降低初始化增益
+                #         if m.bias is not None:
+                #             nn.init.zeros_(m.bias)
 
     def _get_gate_weights(self, x: torch.Tensor) -> torch.Tensor:
-        """数据驱动的门控权重计算（单任务场景核心）"""
-        # 计算输入特征的全局统计（均值池化，适配任意维度输入）
-        # x: [batch_size, ..., in_features] → [batch_size, in_features]
-        x_pooled = x.mean(dim=tuple(range(1, len(x.shape)-1)))  # 除了batch和最后一维，其余维度求均值
-        # 门控输出：[batch_size, expert_num] → Softmax归一化
-        gate_logits = self.gate_mlp(x_pooled) / self.gate_temp
-        gate_weights = F.softmax(gate_logits, dim=-1)
+        x_reshaped = x.reshape(-1, x.shape[-1])  # [B*L, D] → 展平序列维度，便于gate_mlp计算
+        # gate_weights = self.gate_mlp(x_reshaped)  # gate_mlp: D → gate_hidden_dim → expert_num
+        gate_weights = self.gate_linear(x_reshaped)
+        gate_weights = gate_weights.reshape(*x.shape[:-1], self.expert_num)  # 核心：匹配输入的前N维
+        gate_weights = torch.softmax(gate_weights / self.gate_temp, dim=-1)
         return gate_weights
-    def T(w):
-        return w.transpose(0, 1) if self.fan_in_fan_out else w
+    
     def train(self, mode: bool = True):
+        def T(w): 
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
         nn.Linear.train(self, mode)
         if mode:
             if self.merge_weights and self.merged:
-                self.unmerge()
+                if self.r == 0:
+                    return
+                dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
+                gate_weights = self._get_gate_weights(dummy_x)  
+                for e in range(self.expert_num):
+                    delta_W = T(self.lora_B[e] @ self.lora_A[e]) 
+                    self.weight.data -= delta_W * self.scaling * gate_weights[0, e]
                 self.merged = False
         else:
-            # 评估模式：合并权重（如果未合并）
             if self.merge_weights and not self.merged:
-                self.merge()
+                if self.r == 0:
+                    return
+                dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
+                gate_weights = self._get_gate_weights(dummy_x)  
+                for e in range(self.expert_num):
+                    delta_W = T(self.lora_B[e] @ self.lora_A[e])  
+                    self.weight.data += delta_W * self.scaling * gate_weights[0, e]
                 self.merged = True
 
-    def merge(self):
-        """合并MoELoRA权重到预训练权重(评估加速)"""
-        if self.r == 0:
-            return
-        # 单任务场景：用默认均值权重合并（或随机选一个样本的权重）
-        dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
-        gate_weights = self._get_gate_weights(dummy_x)  # [1, expert_num]
-        # 合并每个专家的LoRA增量
-        for e in range(self.expert_num):
-            delta_W = T(self.lora_B[e] @ self.lora_A[e])  # [out_features, in_features]
-            self.weight.data += delta_W * self.scaling * gate_weights[0, e]
-
-    def unmerge(self):
-        """解合并MoELoRA权重"""
-        if self.r == 0:
-            return
-        dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
-        gate_weights = self._get_gate_weights(dummy_x)  # [1, expert_num]
-        for e in range(self.expert_num):
-            delta_W = T(self.lora_B[e] @ self.lora_A[e])  # [out_features, in_features]
-            self.weight.data -= delta_W * self.scaling * gate_weights[0, e]
-    
     def forward(self, x: torch.Tensor):
-        """
-        前向传播:单任务MoELoRA核心逻辑(无需task_id)
-        Args:
-            x: 输入特征 → [batch_size, ..., in_features]
-        """
-        # 1. 基础预训练Linear层输出
-        result = F.linear(x, self._transpose_weight(self.weight), bias=self.bias)
-
-        # 2. MoELoRA核心逻辑（仅当LoRA启用且未合并时生效）
+        def T(w):
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
+        result = F.linear(x, T(self.weight), bias=self.bias)
         if self.r > 0 and not self.merged:
-            # 2.1 LoRA Dropout（和原始LoRA一致）
-            x_dropout = self.lora_dropout(x)  # [batch_size, ..., in_features]
-            # 2.2 计算数据驱动的专家权重
-            gate_weights = self._get_gate_weights(x)  # [batch_size, expert_num]
-            # 2.3 展平输入维度（方便计算）
+            x_dropout = self.lora_dropout(x)  
+            gate_weights = self._get_gate_weights(x_dropout)
             x_shape = x_dropout.shape
-            x_flat = x_dropout.reshape(-1, x_shape[-1])  # [total_tokens, in_features]
-            gate_weights_flat = gate_weights.repeat_interleave(
-                x_flat.shape[0] // gate_weights.shape[0], dim=0
-            )  # [total_tokens, expert_num]
-
+            x_flat = x_dropout.reshape(-1, x_shape[-1])  
+            gate_weights_flat = gate_weights.reshape(-1, self.expert_num)
+            # a. 筛选前k个专家的权重和索引
+            topk_vals, topk_indices = torch.topk(
+                gate_weights_flat, 
+                k=self.top_k, 
+                dim=-1,  # 沿专家维度筛选
+                largest=True  # 选权重最大的k个
+            )
+            # b. 构建掩码：仅保留前k个专家的权重，其余置0
+            gate_weights_masked = torch.zeros_like(gate_weights_flat)
+            # scatter_：将topk_vals填充到topk_indices对应的位置
+            gate_weights_masked.scatter_(
+                dim=-1, 
+                index=topk_indices, 
+                src=topk_vals
+            )
+            # c. 替换原有gate_weights_flat为掩码后的版本
+            gate_weights_flat = gate_weights_masked
             
+            
+            # 5. 计算负载均衡损失
+            expert_selected = (gate_weights_masked > 0).float().sum(dim=0)
+            if expert_selected.sum() > 0:
+                # expert_selected_ratio = expert_selected / expert_selected.sum()
+                # target_ratio = torch.ones_like(expert_selected_ratio) / self.expert_num
+                # self.load_balance_loss = F.mse_loss(expert_selected_ratio, target_ratio)
+                expert_selected_ratio = expert_selected / (expert_selected.sum() + 1e-8)  # 分母防0
+                expert_selected_ratio = expert_selected_ratio.clamp(min=1e-8)  # 分子防0，避免log(0)
+                target_ratio = torch.ones_like(expert_selected_ratio) / self.expert_num
+                target_ratio = target_ratio.clamp(min=1e-8)  # 目标分布也防0（兜底）
+                # self.load_balance_loss = F.kl_div(
+                #     expert_selected_ratio.log(),  # 输入1：对数概率
+                #     target_ratio,                # 输入2：目标概率
+                #     reduction="mean",            # 替换batchmean→mean（无批次维度）
+                #     log_target=False             # 显式声明target不是对数概率（默认False，可省略）
+                # )
+                ratio_loss = F.kl_div(
+                    expert_selected_ratio.log(),  # 输入1：对数概率
+                    target_ratio,                # 输入2：目标概率
+                    reduction="mean",            # 替换batchmean→mean（无批次维度）
+                    log_target=False             # 显式声明target不是对数概率（默认False，可省略）
+                )
+                # # 新增：专家输出差异损失（鼓励专家学不同特征）
+                # expert_outputs = []
+                # for e in range(self.expert_num):
+                #     a_out = x_flat @ self.lora_A[e].T
+                #     b_out = a_out @ self.lora_B[e].T
+                #     expert_outputs.append(b_out)
+                # expert_outputs = torch.stack(expert_outputs, dim=1)  # [B*L, expert_num, out_features]
+                # # 计算专家间的余弦相似度（越小越好）
+                # sim_matrix = F.cosine_similarity(expert_outputs.unsqueeze(1), expert_outputs.unsqueeze(2), dim=-1)
+                # diversity_loss = (sim_matrix.sum() - self.expert_num) / (self.expert_num * (self.expert_num - 1))
+                # # 总负载均衡损失：比例均衡（低权重） + 特征多样性（高权重）
+                # self.load_balance_loss = 0.1 * ratio_loss + 0.9 * diversity_loss
+                diversity_loss = 0.0
+                count = 0
 
-            # 2.4 遍历每个专家计算LoRA输出，再加权求和（MoELoRA核心）
-            lora_output = 0.0
+                # for e1 in range(self.expert_num):
+                #     for e2 in range(e1+1, self.expert_num):  
+                #         a_out1 = x_flat @ self.lora_A[e1].T
+                #         b_out1 = a_out1 @ self.lora_B[e1].T
+                #         a_out2 = x_flat @ self.lora_A[e2].T
+                #         b_out2 = a_out2 @ self.lora_B[e2].T
+                #         sim = F.cosine_similarity(b_out1, b_out2, dim=-1).mean()
+                #         diversity_loss += sim
+                #         count += 1
+                # diversity_loss = diversity_loss / count if count > 0 else 0.0
+                # diversity_loss = diversity_loss.clamp(min=0.0, max=1.0)
+                with torch.no_grad():
+                    expert_outs = []
+                    for e in range(self.expert_num):
+                        a_out = x_flat @ self.lora_A[e].T
+                        b_out = a_out @ self.lora_B[e].T
+                        b_out_mean = b_out.mean(dim=0)  # 仅保留特征维度均值
+                        expert_outs.append(b_out_mean)
+                        del a_out, b_out
+                        torch.cuda.empty_cache()  # 清理显存碎片
+                    for e1 in range(self.expert_num):
+                        for e2 in range(e1+1, self.expert_num):
+                            sim = F.cosine_similarity(expert_outs[e1], expert_outs[e2], dim=-1).item()  # 标量输出
+                            diversity_loss += sim
+                            count += 1
+                diversity_loss = diversity_loss / count if count > 0 else 0.0
+                diversity_loss = torch.tensor(diversity_loss, device=x.device, dtype=torch.float32).clamp(min=0.0, max=1.0)
+                self.load_balance_loss = 0.01 * ratio_loss + 0.99 * diversity_loss  
+            else:
+                self.load_balance_loss = torch.tensor(0.0, device=x.device)
+            
+            explore_prob = 0.1 #0.01  
+            explore_mask = (torch.rand_like(gate_weights_flat[:,0]) < explore_prob).unsqueeze(-1)
+            if explore_mask.any():  
+                # random_indices = torch.randint(
+                #     0, self.expert_num, 
+                #     size=gate_weights_flat.shape[:-1],  
+                #     device=x.device
+                # )
+                expert_selected_ratio = expert_selected / (expert_selected.sum() + 1e-8)
+                explore_probs = 1 - expert_selected_ratio
+                explore_probs = explore_probs / (explore_probs.sum() + 1e-8)
+                explore_probs_expanded = explore_probs.unsqueeze(0).repeat(gate_weights_flat.shape[0], 1)
+                mask_squeezed = explore_mask.squeeze(-1)
+                random_indices = torch.multinomial(
+                    explore_probs_expanded[mask_squeezed],
+                    num_samples=1,
+                    replacement=True,
+                )
+                random_indices_full = torch.zeros( (gate_weights_flat.shape[0], 1), dtype=torch.long, device=x.device)
+                random_indices_full[mask_squeezed, :] = random_indices
+                
+                random_vals = torch.zeros_like(gate_weights_flat)
+                random_vals.scatter_(
+                    dim=-1,  # 在最后一维（专家维度）填充
+                    index=random_indices_full,  # [B*L, 1]（2D）
+                    src=torch.ones_like(random_indices_full, dtype=random_vals.dtype)  # 权重设为1，维度匹配
+                )
+                gate_weights_flat = torch.where(explore_mask, random_vals, gate_weights_flat)
+
+            lora_output = torch.zeros(x_flat.shape[0], self.out_features, device=x_flat.device, dtype=x_flat.dtype)
             for e in range(self.expert_num):
-                # 专家A：x → [total_tokens, per_expert_r]
-                a_out = x_flat @ self.lora_A[e].T  # A_e.T: [in_features, per_expert_r]
-                # 专家B：a_out → [total_tokens, out_features]
-                b_out = a_out @ self.lora_B[e].T  # B_e.T: [per_expert_r, out_features]
-                # 乘以当前专家的权重 + LoRA缩放系数
-                b_out = b_out * self.scaling * gate_weights_flat[:, e: e+1]  # [total_tokens, out_features]
-                # 累加所有专家的输出
+                a_out = x_flat @ self.lora_A[e].T  
+                b_out = a_out @ self.lora_B[e].T  
+                b_out = b_out * self.scaling * gate_weights_flat[:, e: e+1]  
                 lora_output += b_out
-
-            # 2.5 恢复维度并叠加到基础输出
-            lora_output = lora_output.reshape(*x_shape[:-1], self.out_features)  # [batch_size, ..., out_features]
+            lora_output = lora_output.reshape(*x_shape[:-1], self.out_features) 
             result += lora_output
-
-        return result
+            return result
+        else:
+            return F.linear(x, T(self.weight), bias=self.bias)
+    def get_load_balance_loss(self) -> torch.Tensor:
+        return self.load_balance_loss * self.load_balance_coeff

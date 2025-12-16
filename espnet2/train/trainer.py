@@ -66,7 +66,7 @@ try:
     import loralib as lora
 except Exception:
     lora = None
-
+from loralib.layers import MoELoRALinear  
 try:
     import s3prl # type: ignore
 except Exception:
@@ -711,6 +711,11 @@ class Trainer:
             reporter.register(stats, weight)
 
             with reporter.measure_time("backward_time"):
+                load_balance_loss = torch.tensor(0.0, device=loss.device)
+                for module in model.modules(): 
+                    if isinstance(module, MoELoRALinear):
+                        load_balance_loss += module.get_load_balance_loss()
+                loss = loss + load_balance_loss  # 覆盖原loss变量
                 if scaler is not None:
                     # Scales loss.  Calls backward() on scaled loss
                     # to create scaled gradients.

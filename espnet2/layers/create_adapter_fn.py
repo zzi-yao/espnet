@@ -391,7 +391,7 @@ def create_moelora_adapter(
     alpha: int = 8,
     expert_num: int = 4,
     gate_temp: float = 6.0,
-    gate_hidden_dim: int = 64,
+    top_k: int = 2,  # 新增：默认k=2
     dropout_rate: float = 0.0,
     target_modules: List[str] = ["query"],
     bias_type: Optional[str] = "none",
@@ -407,13 +407,28 @@ def create_moelora_adapter(
         is_traget_module_exists = True
 
         parent_module, target_name, target_module = get_submodules(model, key)
+        # if not isinstance(target_module, lora.LoRALayer):
+        #     new_module = create_moelora_module(
+        #         target_module, rank, alpha, dropout_rate,expert_num,gate_temp,gate_hidden_dim, top_k
+        #     )
+        #     replace_module(parent_module, target_name, target_module, new_module)
+        # else:
+        #     continue
         if not isinstance(target_module, lora.LoRALayer):
-            new_module = create_moelora_module(
-                target_module, rank, alpha, dropout_rate,expert_num,gate_temp,gate_hidden_dim
-            )
+            is_mlp = any(mlp_key in key for mlp_key in ["mlp.0", "mlp.2"])
+            if is_mlp:
+                new_module = create_new_lora_module(
+                    target_module, rank, alpha, dropout_rate
+                )
+            else:
+                new_module = create_moelora_module(
+                    target_module, rank, alpha, dropout_rate,expert_num,gate_temp,top_k
+                )
+
             replace_module(parent_module, target_name, target_module, new_module)
         else:
             continue
+
 
     if not is_traget_module_exists:
         raise ValueError(
@@ -423,8 +438,7 @@ def create_moelora_adapter(
 @typechecked
 def create_moelora_module(
     target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,expert_num: int = 4,
-    gate_temp: float = 6.0,
-    gate_hidden_dim: int = 64,
+    gate_temp: float = 6.0,top_k: int = 2,  # 新增：默认k=2
 ):
     """Create a new lora module for the given target module."""
     bias = hasattr(target_module, "bias") and target_module.bias is not None
@@ -446,7 +460,7 @@ def create_moelora_module(
             lora_dropout=dropout_rate,
             expert_num=expert_num,      
             gate_temp=gate_temp,   
-            gate_hidden_dim=gate_hidden_dim,
+            top_k=top_k,  # 新增：默认k=2
         )
     else:
         raise ValueError(
