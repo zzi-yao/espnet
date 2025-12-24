@@ -34,10 +34,10 @@ num_workers: 4
 sort_in_batch: descending       # how to sort data in making batch
 sort_batch: descending          # how to sort created batches
 batch_type: folded
-batch_size: 10 #10
+batch_size: 12
 accum_grad: 1
-max_epoch: 10
-patience: 3  #none
+max_epoch: 7
+patience: none
 init: none
 best_model_criterion:
 -   - valid
@@ -52,10 +52,8 @@ cudnn_benchmark: false
 optim: adamw
 grad_clip: 1.0
 optim_conf:
-    lr: 1.0e-04
-    # moelora_lr_coeff: 0.6
-    # gate_lr_coeff: 0.3
-    # weight_decay: 0.01
+    lr: 5.0e-04
+    weight_decay: 0.01
     betas:
     - 0.9
     - 0.99
@@ -67,13 +65,20 @@ scheduler_conf:
 
 # LoRA finetune related
 use_adapter: true
-adapter: moelora
+adapter: gora
 save_strategy: required_grad_only
 adapter_conf:
     rank: 16  #8
     alpha: 32    #16
-    expert_num: 3    #4        
-    # gate_temp: 3.0     #3,5.0     
-    # top_k: 1  #2  # 新增：每个token选2个专家
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
+
+# ========== GoRA 新增配置 ==========
+gora_total_param_budget: 6488064  # 你的模型总可训练参数量（6.49M）
+gora_grad_steps: 4           # 梯度累积步数
+gora_min_rank: 4             # 每层最小秩
+gora_max_rank: 32            # 每层最大秩
+gora_importance_type: "union_mean"  # 重要性计算方式
+gora_stable_gamma: 1.0      # 初始化稳定系数
+gora_init_method: "grad_compress"   # GoRA初始化方式
+gora_rank_stablize: true     # 秩稳定化

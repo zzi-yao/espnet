@@ -27,8 +27,8 @@ except ImportError:
     is_transformers_available = False
 
 try:
-    import s3prl  # noqa
-    from s3prl.upstream.wav2vec2.wav2vec2_model import TransformerSentenceEncoderLayer
+    import s3prl   # type: ignore
+    from s3prl.upstream.wav2vec2.wav2vec2_model import TransformerSentenceEncoderLayer # type: ignore
 
     is_s3prl_available = True
 except ImportError:
@@ -171,7 +171,7 @@ def create_new_houlsby_module(target_module: torch.nn.Module, bottleneck: int):
         )
         adapter_added_layer = target_module
 
-    elif isinstance(target_module, TransformerSentenceEncoderLayer):
+    elif isinstance(target_module, TransformerSentenceEncoderLayer): # type: ignore
 
         if HoulsbyTransformerSentenceEncoderLayer is None:
             raise ImportError(
@@ -390,8 +390,8 @@ def create_moelora_adapter(
     rank: int = 8,
     alpha: int = 8,
     expert_num: int = 4,
-    gate_temp: float = 6.0,
-    top_k: int = 2,  # 新增：默认k=2
+    # gate_temp: float = 6.0,
+    # top_k: int = 2,  # 新增：默认k=2
     dropout_rate: float = 0.0,
     target_modules: List[str] = ["query"],
     bias_type: Optional[str] = "none",
@@ -415,14 +415,24 @@ def create_moelora_adapter(
         # else:
         #     continue
         if not isinstance(target_module, lora.LoRALayer):
-            is_mlp = any(mlp_key in key for mlp_key in ["mlp.0", "mlp.2"])
-            if is_mlp:
-                new_module = create_new_lora_module(
-                    target_module, rank, alpha, dropout_rate
-                )
-            else:
-                new_module = create_moelora_module(
-                    target_module, rank, alpha, dropout_rate,expert_num,gate_temp,top_k
+            # is_mlp = any(mlp_key in key for mlp_key in ["mlp.0", "mlp.2"])
+            # is_mlp = any(mlp_key in key for mlp_key in ["attn.out"])
+            # if is_mlp:
+            #     # new_module = create_new_lora_module(
+            #     #     target_module, rank, alpha, dropout_rate
+            #     # )
+            #     new_module = create_moelora_module(
+            #         target_module, rank, alpha, dropout_rate,expert_num  #, gate_temp, top_k, is_o_layer=True
+            #     )
+            # else:
+            #     # new_module = create_moelora_module(
+            #     #     target_module, rank, alpha, dropout_rate,expert_num
+            #     # )
+            #     new_module = create_new_lora_module(
+            #         target_module, rank, alpha, dropout_rate
+            #     )
+            new_module = create_moelora_module(
+                    target_module, rank, alpha, dropout_rate,expert_num  #, gate_temp, top_k, is_o_layer=True
                 )
 
             replace_module(parent_module, target_name, target_module, new_module)
@@ -438,7 +448,7 @@ def create_moelora_adapter(
 @typechecked
 def create_moelora_module(
     target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,expert_num: int = 4,
-    gate_temp: float = 6.0,top_k: int = 2,  # 新增：默认k=2
+    # gate_temp: float = 6.0,top_k: int = 2, is_o_layer=False,  # 新增：默认k=2
 ):
     """Create a new lora module for the given target module."""
     bias = hasattr(target_module, "bias") and target_module.bias is not None
@@ -459,8 +469,75 @@ def create_moelora_module(
             lora_alpha=alpha,
             lora_dropout=dropout_rate,
             expert_num=expert_num,      
-            gate_temp=gate_temp,   
-            top_k=top_k,  # 新增：默认k=2
+            # gate_temp=gate_temp,   
+            # top_k=top_k,  # 新增：默认k=2
+            # is_o_layer=is_o_layer,
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
+
+def create_gora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+    gora_init_method: str = "vanilla",
+    gora_rank_stablize: bool = False,
+):
+
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.LoRALayer):
+            new_module = create_new_gora_module(
+                target_module, rank, alpha, dropout_rate,gora_init_method,gora_rank_stablize,
+            )
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_gora_as_trainable(model,bias_type)
+def create_new_gora_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,gora_init_method: str = "vanilla",gora_rank_stablize: bool = False,
+):
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Embedding):
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            lora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.GoRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout_rate,
+            gora_init_method=gora_init_method,
+            gora_rank_stablize=gora_rank_stablize,
         )
     else:
         raise ValueError(

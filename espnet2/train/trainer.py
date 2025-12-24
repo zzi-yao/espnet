@@ -1,5 +1,8 @@
 """Trainer module."""
-
+import json
+from collections import Counter
+import os
+#
 import argparse
 import dataclasses
 import logging
@@ -175,7 +178,7 @@ class Trainer:
                 scaler.load_state_dict(states["scaler"])
 
         logging.info(f"The training was resumed using {checkpoint}")
-
+    
     @classmethod
     @typechecked
     def run(
@@ -230,12 +233,6 @@ class Trainer:
                 print("Error: S3PRL is not properly installed.")
                 print("Please install S3PRL: cd ${MAIN_ROOT}/tools && make s3prl.done")
                 raise RuntimeError("Requiring S3PRL. ")
-            elif adapter == "vera" and lora is None:
-                raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
-            elif adapter == "melora" and lora is None:
-                raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
-            elif adapter == "moelora" and lora is None:
-                raise RuntimeError("Requiring loralib. Do 'pip install loralib'")
 
         if trainer_options.resume and (output_dir / "checkpoint.pth").exists():
             cls.resume(
@@ -323,7 +320,136 @@ class Trainer:
             )
         else:
             train_summary_writer = None
-
+        # --- GoRA 新增开始：仅在训练开始前（首次epoch）执行一次初始化 ---=========================================
+        # 仅在 rank 0 执行（分布式训练）+ 非恢复训练（resume）+ 使用lora适配器时执行
+        if (start_epoch == 1 
+            and adapter == "gora" 
+            and use_adapter
+            and (not distributed_option.distributed or distributed_option.dist_rank == 0)):
+            try:
+                from loralib.layers import GoRALinear, allocate_ranks_by_importance 
+                from loralib.utils import mark_only_gora_as_trainable 
+                def register_all_gora_hooks(model):
+                    for name, module in model.named_modules():
+                        if isinstance(module, GoRALinear) and module.r > 0:
+                            module._output_hook_handle = None
+                            module._grad_hook_func = None
+                            module.grad_stored = None  # 重置梯度存储
+                            module.grad_steps = 0      # 重置累积步数
+                            logging.debug(f"初始化{name}的GoRA钩子和累积变量")
+                    return model
+                gora_cfg = {
+                    "total_param_budget": getattr(trainer_options, "gora_total_param_budget", 6488064),
+                    "grad_steps": getattr(trainer_options, "gora_grad_steps", 4),
+                    "min_rank": getattr(trainer_options, "gora_min_rank", 4),
+                    "max_rank": getattr(trainer_options, "gora_max_rank", 32),
+                    "importance_type": getattr(trainer_options, "gora_importance_type", "union_mean"),
+                    "stable_gamma": getattr(trainer_options, "gora_stable_gamma", 16.),
+                }
+                logging.info(f"Start GoRA initialization with config: {gora_cfg}")
+        
+                model.train()
+                model = register_all_gora_hooks(model)
+                # original_requires_grad = {}
+                # for n, p in model.named_parameters():
+                #     original_requires_grad[n] = p.requires_grad
+                #     p.grad = None 
+                gora_layer_count = 0
+                for name, module in model.named_modules():    
+                    if isinstance(module, GoRALinear) and module.r > 0:
+                        gora_layer_count += 1
+                        if hasattr(module, 'weight') and module.weight is not None and module.weight.requires_grad:
+                            logging.warning(f"{name}.weight未冻结!自动修正为False")
+                            module.weight.requires_grad = False
+                        logging.debug(f"校验{name}:weight.requires_grad={module.weight.requires_grad}")
+                if gora_layer_count == 0:
+                    raise RuntimeError("未找到任何GoRALinear层,无法执行梯度分秩")
+                train_iter = train_iter_factory.build_iter(start_epoch)  # 替换：用start_epoch而非固定1
+                grad_steps_completed = 0
+                for iiter, (utt_id, batch) in enumerate(train_iter):  # 替换：遍历(utt_id, batch)
+                    if grad_steps_completed >= gora_cfg["grad_steps"]:
+                        break
+                    batch["utt_id"] = utt_id
+                    batch = to_device(batch, "cuda" if trainer_options.ngpu > 0 else "cpu")
+                    optimizers[0].zero_grad()
+                    retval = model(** batch)
+                    loss = retval["loss"] if isinstance(retval, dict) else retval[0]
+                    loss.backward()
+                    grad_steps_completed += 1
+                    logging.info(f"第{grad_steps_completed}个batch梯度计算完成，loss={loss.item()}")
+                for name, module in model.named_modules():
+                    if isinstance(module, GoRALinear):  # 移除 r>0 限制，避免跳过初始层
+                        module.name = name
+                        grad_exists = module.grad_stored is not None
+                        step_count = module.grad_steps
+                        logging.info(f"层 {name}：梯度捕获={grad_exists}, 累积步数={step_count}, 初始秩r={module.r}")
+                        if grad_exists:
+                            logging.info(f"  - 梯度shape: {module.grad_stored.shape}, weight shape: {module.weight.shape}")
+                            grad_norm = torch.norm(module.grad_stored).item()  # 梯度L2范数
+                            grad_mean = torch.mean(torch.abs(module.grad_stored)).item()  # 梯度绝对值均值
+                            logging.info(f"  - 梯度L2范数: {grad_norm:.6f}, 梯度绝对值均值: {grad_mean:.6f}")
+                            if grad_norm < 1e-10:
+                                logging.warning(f"  层 {name} 梯度值接近全0，无法计算有效重要性")
+                        else:
+                            logging.warning(f"  层 {name} 未捕获到梯度（grad_stored=None）")
+                named_ranks = allocate_ranks_by_importance(
+                    model=model,
+                    total_param_budget=gora_cfg["total_param_budget"],  # 替换为参数量预算
+                    importance_type=gora_cfg["importance_type"],
+                    min_rank=gora_cfg["min_rank"],
+                    max_rank=gora_cfg["max_rank"],
+                )
+                logging.info(f"GoRA rank allocation result: {named_ranks}")
+                if not named_ranks:
+                    raise RuntimeError("GoRA分秩结果为空,请检查梯度捕获是否生效")
+                for name, module in model.named_modules():
+                    if isinstance(module, GoRALinear) and name in named_ranks:
+                        module.dynamic_init(
+                            target_rank=named_ranks[name],
+                            stable_gamma=gora_cfg["stable_gamma"]
+                        )
+                for name, module in model.named_modules():
+                    if isinstance(module, GoRALinear) and module.r > 0:
+                        if module._output_hook_handle is not None:
+                            module._output_hook_handle.remove()
+                            module._output_hook_handle = None
+                            logging.debug(f"清理{name}的梯度钩子")
+                scaler = None
+                optimizers[0].zero_grad()
+                for name, module in model.named_modules():
+                    if isinstance(module, GoRALinear) and module.r > 0:
+                        if hasattr(module, 'lora_A') and module.lora_A is not None:
+                            if not module.lora_A.requires_grad:
+                                logging.error(f"❌ {name}.lora_A 不可训练！强制修正为True")
+                                module.lora_A.requires_grad = True
+                            else:
+                                logging.info(f"✅ {name}.lora_A 可训练（状态正确）")
+                        if hasattr(module, 'lora_B') and module.lora_B is not None:
+                            if not module.lora_B.requires_grad:
+                                logging.error(f"❌ {name}.lora_B 不可训练！强制修正为True")
+                                module.lora_B.requires_grad = True
+                            else:
+                                logging.info(f"✅ {name}.lora_B 可训练（状态正确）")
+                        if module.weight.requires_grad:
+                            logging.error(f"❌ {name}.weight 未冻结！强制修正为False")
+                            module.weight.requires_grad = False
+                        else:
+                            logging.info(f"✅ {name}.weight 已冻结（状态正确）")
+                # mark_only_gora_as_trainable(model, bias="none")  
+                torch.cuda.empty_cache()
+                with open(output_dir / "gora_rank_allocation.json", "w") as f:
+                    json.dump(named_ranks, f, indent=2)
+                logging.info(f"GoRA initialization finished, rank saved to {output_dir / 'gora_rank_allocation.json'}")
+            except Exception as e:
+                logging.error(f"GoRA initialization failed: {e}", exc_info=True)
+                raise RuntimeError("GoRA init error, stop training")
+            trainable_params = [n for n, p in model.named_parameters() if p.requires_grad]
+            logging.info(f"=== GoRA init finished, trainable params count: {len(trainable_params)} ===")
+            if len(trainable_params) == 0:
+                logging.error("FATAL: No trainable params after GoRA init!")
+                raise RuntimeError("No trainable parameters")
+            logging.info(f"First 10 trainable params: {trainable_params[:10]}")
+        # --- GoRA 新增结束 ---================================================================
         start_time = time.perf_counter()
         for iepoch in range(start_epoch, trainer_options.max_epoch + 1):
             if iepoch != start_epoch:
@@ -420,12 +546,6 @@ class Trainer:
                                 for k, v in model_state_dict.items()
                                 if "adapter" in k
                             }
-                        elif adapter == "vera":
-                            model_state_dict = lora.vera_state_dict(model)
-                        elif adapter == "melora":
-                            model_state_dict = lora.melora_state_dict(model)
-                        elif adapter == "moelora":
-                            model_state_dict = lora.moelora_state_dict(model)
                         else:
                             raise ValueError(f"Adapter type {adapter} not supported")
                     else:  # save_strategy == "required_grad_only"
@@ -555,6 +675,7 @@ class Trainer:
                 best_model_criterion=trainer_options.best_model_criterion,
                 nbest=keep_nbest_models,
             )
+      
 
     @classmethod
     @typechecked
@@ -570,7 +691,6 @@ class Trainer:
         options: TrainerOptions,
         distributed_option: DistributedOption,
     ) -> bool:
-
         grad_noise = options.grad_noise
         accum_grad = options.accum_grad
         grad_clip = options.grad_clip
@@ -608,6 +728,7 @@ class Trainer:
             batch["utt_id"] = utt_id
 
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
+
             if no_forward_run:
                 all_steps_are_invalid = False
                 continue
@@ -653,6 +774,7 @@ class Trainer:
             ):
                 with reporter.measure_time("forward_time"):
                     retval = model(**batch)
+                   
 
                     # Note(kamo):
                     # Supporting two patterns for the returned value from the model
@@ -711,11 +833,12 @@ class Trainer:
             reporter.register(stats, weight)
 
             with reporter.measure_time("backward_time"):
-                load_balance_loss = torch.tensor(0.0, device=loss.device)
-                for module in model.modules(): 
-                    if isinstance(module, MoELoRALinear):
-                        load_balance_loss += module.get_load_balance_loss()
-                loss = loss + load_balance_loss  # 覆盖原loss变量
+                
+                # load_balance_loss = torch.tensor(0.0, device=loss.device)
+                # for module in model.modules(): 
+                #     if isinstance(module, MoELoRALinear):
+                #         load_balance_loss += module.get_load_balance_loss()
+                # loss = loss + load_balance_loss  # 覆盖原loss变量
                 if scaler is not None:
                     # Scales loss.  Calls backward() on scaled loss
                     # to create scaled gradients.
@@ -821,7 +944,6 @@ class Trainer:
                     ),
                 )
                 start_time = time.perf_counter()
-
             # NOTE(kamo): Call log_message() after next()
             reporter.next()
             if iiter % log_interval == 0:
@@ -830,7 +952,6 @@ class Trainer:
                     reporter.tensorboard_add_scalar(summary_writer, -log_interval)
                 if use_wandb:
                     reporter.wandb_log()
-
         else:
             if distributed:
                 iterator_stop.fill_(1)
@@ -853,6 +974,7 @@ class Trainer:
         distributed = distributed_option.distributed
 
         model.eval()
+        
 
         # [For distributed] Because iteration counts are not always equals between
         # processes, send stop-flag to the other processes if iterator is finished
@@ -867,6 +989,8 @@ class Trainer:
             batch["utt_id"] = utt_id
 
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
+
+
             if no_forward_run:
                 continue
 

@@ -58,7 +58,7 @@ optim_conf:
     - 0.9
     - 0.99
     eps: 1.0e-06
-    loraplus_lr_ratio: 16.0  # 添加 LoraPlus 学习率比率
+    loraplus_lr_ratio: 16.0  # 添加 LoraPlus 学习率比率16
 scheduler: warmuplr
 scheduler_conf:
     warmup_steps: 1500

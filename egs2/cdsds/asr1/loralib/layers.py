@@ -3,12 +3,16 @@
 #  Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 #  ------------------------------------------------------------------------------------------
 import torch
+import json
 import torch.nn as nn
 import torch.nn.functional as F
 
 import math
 from typing import Optional, List
 
+import os
+
+##
 class LoRALayer():
     def __init__(
         self, 
@@ -508,57 +512,278 @@ class MeLinear(nn.Linear, MeLoRALayer):
             return F.linear(x, T(self.weight), bias=self.bias)      
 
 
+# class MoELoRALinear(nn.Linear, LoRALayer):
+#     def __init__(
+#         self,
+#         in_features: int,          
+#         out_features: int,         
+#         r: int = 0,                
+#         lora_alpha: int = 1,       
+#         lora_dropout: float = 0.,  
+#         expert_num: int = 4,       
+#         gate_temp: float = 6.0,    
+#         top_k: int = 1,  # 新增：默认k=2
+#         fan_in_fan_out: bool = False,  
+#         merge_weights: bool = True,    
+#         load_balance_coeff: float = 0.005,   #0.01
+#         is_o_layer: bool = False,
+#         **kwargs
+#     ):
+#         nn.Linear.__init__(self, in_features, out_features, **kwargs)
+#         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
+#         self.fan_in_fan_out = fan_in_fan_out
+#         self.expert_num = expert_num
+#         self.gate_temp = gate_temp
+#         self.top_k = top_k
+#         self.load_balance_coeff = load_balance_coeff
+#         self.load_balance_loss = torch.tensor(0.0, device=self.weight.device)
+#         self.is_o_layer = is_o_layer
+
+#         self.per_expert_r = r // expert_num if (r > 0 and expert_num > 0) else 0
+#         if r > 0:
+#             assert r % expert_num == 0
+#             self.scaling = self.lora_alpha / self.r  
+#             self.lora_A = nn.ParameterList([
+#                 nn.Parameter(self.weight.new_zeros((self.per_expert_r, in_features)))
+#                 for _ in range(self.expert_num)
+#             ])
+#             self.lora_B = nn.ParameterList([
+#                 nn.Parameter(self.weight.new_zeros((out_features, self.per_expert_r)))
+#                 for _ in range(self.expert_num)
+#             ])
+#             self.gate_linear = nn.Linear(in_features, self.expert_num)  # 仅一层线性层
+#             self.gate_linear.weight.requires_grad = True
+#             if self.gate_linear.bias is not None:
+#                 self.gate_linear.bias.requires_grad = True
+#             self.weight.requires_grad = False
+#         self.pretrained_expert_paths = [
+#             "exp/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual_yu/pretrained_moelora_experts/expert_0.pth",
+#             "exp/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual_yu/pretrained_moelora_experts/expert_1.pth",
+#             "exp/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual_yu/pretrained_moelora_experts/expert_2.pth",
+#             "exp/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual_yu/pretrained_moelora_experts/expert_3.pth"
+#         ]
+#         self.reset_parameters()
+#         if r > 0 and self.is_o_layer:  # 仅当LoRA秩>0时加载
+#             self.load_pretrained_experts()
+#         if fan_in_fan_out:
+#             self.weight.data = self.weight.data.transpose(0, 1)  
+
+#     def reset_parameters(self):
+#         nn.Linear.reset_parameters(self)
+#         if hasattr(self, 'r') and self.r > 0:
+#             if hasattr(self, 'gate_linear'):
+#                 nn.init.xavier_uniform_(self.gate_linear.weight, gain=0.1)
+#                 if self.gate_linear.bias is not None:
+#                     nn.init.zeros_(self.gate_linear.bias)
+
+#     def load_pretrained_experts(self):
+#         assert len(self.pretrained_expert_paths) == self.expert_num, "专家数不匹配"
+#         for e, ckpt_path in enumerate(self.pretrained_expert_paths):
+#             ckpt = torch.load(ckpt_path, map_location=self.weight.device)
+#             self.lora_A[e].data = ckpt['lora_A'].to(self.weight.device)
+#             self.lora_B[e].data = ckpt['lora_B'].to(self.weight.device)
+
+#     def _get_gate_weights(self, x: torch.Tensor) -> torch.Tensor:
+#         x_reshaped = x.reshape(-1, x.shape[-1])  # [B*L, D] → 展平序列维度，便于gate_mlp计算
+#         # gate_weights = self.gate_mlp(x_reshaped)  # gate_mlp: D → gate_hidden_dim → expert_num
+#         gate_weights = self.gate_linear(x_reshaped)
+#         gate_weights = gate_weights.reshape(*x.shape[:-1], self.expert_num)  # 核心：匹配输入的前N维
+#         gate_weights = torch.softmax(gate_weights / self.gate_temp, dim=-1)
+#         # if self.training and hasattr(self, 'target_expert_id'):
+#         #     target_expert = self.target_expert_id  # 直接用提前设置的专家ID
+#         #     gate_weights = gate_weights.clone()  # 复制张量，脱离原计算图
+#         #     gate_weights[..., target_expert] = gate_weights[..., target_expert] + 1.5
+#         #     gate_weights = gate_weights / gate_weights.sum(dim=-1, keepdim=True)
+#         # 条件1：训练模式；条件2：有target_expert_ids；条件3：输入不是dummy_x（batch维度匹配）
+#         is_real_train_sample = (
+#             self.training 
+#             and hasattr(self, 'target_expert_ids') 
+#             and len(self.target_expert_ids) > 0  # 宽松判断
+#         )
+#         if is_real_train_sample:
+#             target_ids = torch.tensor(self.target_expert_ids, device=gate_weights.device)  # [B]
+#             if gate_weights.dim() == 3:
+#                 target_ids = target_ids.unsqueeze(1).repeat(1, gate_weights.shape[1])  # [B, L]
+#             gate_weights = gate_weights.clone()
+#             gate_weights = gate_weights.scatter_add_(
+#                 dim=-1,
+#                 index=target_ids.unsqueeze(-1),  # [B, L, 1] 或 [B, 1]
+#                 src=torch.ones_like(gate_weights) * 0.5  # 偏置强度0.5
+#             )
+#             gate_weights = gate_weights / gate_weights.sum(dim=-1, keepdim=True)
+#             # ========== 修正：使用全局gate_logger，补充batch序号 ==========
+#             current_batch_idx = getattr(self, 'moe_batch_idx', 0)
+#             if current_batch_idx % 50 == 0:
+#                 gate_weights_mean = gate_weights.mean(dim=1) if gate_weights.dim() ==3 else gate_weights
+#                 sample_num = min(3, len(self.target_expert_ids))
+#                 for idx in range(sample_num):
+#                     target_id = self.target_expert_ids[idx]
+#                     weight = gate_weights_mean[idx].detach().cpu().numpy().round(3)
+#                     gate_logger.info(
+#                         f"Batch {current_batch_idx} - "
+#                         f"Sample {idx} - Target expert: {target_id} - "
+#                         f"Gate weights: {weight}"
+#                     )
+#         return gate_weights
+    
+#     def train(self, mode: bool = True):
+#         def T(w): 
+#             return w.transpose(0, 1) if self.fan_in_fan_out else w
+#         nn.Linear.train(self, mode)
+#         if mode:
+#             if self.merge_weights and self.merged:
+#                 if self.r == 0:
+#                     return
+#                 dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
+#                 gate_weights = self._get_gate_weights(dummy_x)  
+#                 for e in range(self.expert_num):
+#                     delta_W = T(self.lora_B[e] @ self.lora_A[e]) 
+#                     self.weight.data -= delta_W * self.scaling * gate_weights[0, e]
+#                 self.merged = False
+#         else:
+#             if self.merge_weights and not self.merged:
+#                 if self.r == 0:
+#                     return
+#                 dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
+#                 gate_weights = self._get_gate_weights(dummy_x)  
+#                 for e in range(self.expert_num):
+#                     delta_W = T(self.lora_B[e] @ self.lora_A[e])  
+#                     self.weight.data += delta_W * self.scaling * gate_weights[0, e]
+#                 self.merged = True
+
+#     def forward(self, x: torch.Tensor):
+#         def T(w):
+#             return w.transpose(0, 1) if self.fan_in_fan_out else w
+#         result = F.linear(x, T(self.weight), bias=self.bias)
+#         if self.r > 0 and not self.merged:
+#             x_dropout = self.lora_dropout(x)  
+#             gate_weights = self._get_gate_weights(x_dropout)
+#             x_shape = x_dropout.shape
+#             x_flat = x_dropout.reshape(-1, x_shape[-1])  
+#             gate_weights_flat = gate_weights.reshape(-1, self.expert_num)
+#             topk_vals, topk_indices = torch.topk(
+#                 gate_weights_flat, 
+#                 k=self.top_k, 
+#                 dim=-1,  # 沿专家维度筛选
+#                 largest=True  # 选权重最大的k个
+#             )
+#             gate_weights_masked = torch.zeros_like(gate_weights_flat)
+#             gate_weights_masked.scatter_(
+#                 dim=-1, 
+#                 index=topk_indices, 
+#                 src=topk_vals
+#             )
+#             gate_weights_flat = gate_weights_masked
+#             # 5. 计算负载均衡损失
+#             expert_selected = (gate_weights_masked > 0).float().sum(dim=0)
+#             if expert_selected.sum() > 0:
+#                 expert_selected_ratio = expert_selected / (expert_selected.sum() + 1e-8)  # 分母防0
+#                 expert_selected_ratio = expert_selected_ratio.clamp(min=1e-8)  # 分子防0，避免log(0)
+#                 target_ratio = torch.ones_like(expert_selected_ratio) / self.expert_num
+#                 target_ratio = target_ratio.clamp(min=1e-8)  # 目标分布也防0（兜底）
+#                 ratio_loss = F.kl_div(
+#                     expert_selected_ratio.log(),  # 输入1：对数概率
+#                     target_ratio,                # 输入2：目标概率
+#                     reduction="mean",            # 替换batchmean→mean（无批次维度）
+#                     log_target=False             # 显式声明target不是对数概率（默认False，可省略）
+#                 )
+#                 diversity_loss = 0.0
+#                 count = 0
+#                 with torch.no_grad():
+#                     expert_outs = []
+#                     for e in range(self.expert_num):
+#                         a_out = x_flat @ self.lora_A[e].T
+#                         b_out = a_out @ self.lora_B[e].T
+#                         b_out_mean = b_out.mean(dim=0)  # 仅保留特征维度均值
+#                         expert_outs.append(b_out_mean)
+#                         del a_out, b_out
+#                         torch.cuda.empty_cache()  # 清理显存碎片
+#                     for e1 in range(self.expert_num):
+#                         for e2 in range(e1+1, self.expert_num):
+#                             sim = F.cosine_similarity(expert_outs[e1], expert_outs[e2], dim=-1).item()  # 标量输出
+#                             diversity_loss += sim
+#                             count += 1
+#                 diversity_loss = diversity_loss / count if count > 0 else 0.0
+#                 diversity_loss = torch.tensor(diversity_loss, device=x.device, dtype=torch.float32).clamp(min=0.0, max=1.0)
+#                 self.load_balance_loss = 0.01 * ratio_loss + 0.99 * diversity_loss
+#                 # ========== 打印负载均衡损失到独立日志 ==========
+#                 current_batch_idx = getattr(self, 'moe_batch_idx', 0)
+#                 if current_batch_idx % 50 == 0:
+#                     gate_logger.info(
+#                         f"Batch {current_batch_idx} - "  # 统一用current_batch_idx，避免显示unknown
+#                         f"Load balance loss: {self.load_balance_loss.item():.6f} | "
+#                         f"Ratio loss: {ratio_loss.item():.6f} | "
+#                         f"Diversity loss: {diversity_loss.item():.6f}"
+#                     ) 
+#             else:
+#                 self.load_balance_loss = torch.tensor(0.0, device=x.device)
+            
+#             explore_prob = 0.0 #0.01  
+#             explore_mask = (torch.rand_like(gate_weights_flat[:,0]) < explore_prob).unsqueeze(-1)
+#             if explore_mask.any():  
+#                 expert_selected_ratio = expert_selected / (expert_selected.sum() + 1e-8)
+#                 explore_probs = 1 - expert_selected_ratio
+#                 explore_probs = explore_probs / (explore_probs.sum() + 1e-8)
+#                 explore_probs_expanded = explore_probs.unsqueeze(0).repeat(gate_weights_flat.shape[0], 1)
+#                 mask_squeezed = explore_mask.squeeze(-1)
+#                 random_indices = torch.multinomial(
+#                     explore_probs_expanded[mask_squeezed],
+#                     num_samples=1,
+#                     replacement=True,
+#                 )
+#                 random_indices_full = torch.zeros( (gate_weights_flat.shape[0], 1), dtype=torch.long, device=x.device)
+#                 random_indices_full[mask_squeezed, :] = random_indices
+                
+#                 random_vals = torch.zeros_like(gate_weights_flat)
+#                 random_vals.scatter_(
+#                     dim=-1,  # 在最后一维（专家维度）填充
+#                     index=random_indices_full,  # [B*L, 1]（2D）
+#                     src=torch.ones_like(random_indices_full, dtype=random_vals.dtype)  # 权重设为1，维度匹配
+#                 )
+#                 gate_weights_flat = torch.where(explore_mask, random_vals, gate_weights_flat)
+
+#             lora_output = torch.zeros(x_flat.shape[0], self.out_features, device=x_flat.device, dtype=x_flat.dtype)
+#             for e in range(self.expert_num):
+#                 a_out = x_flat @ self.lora_A[e].T  
+#                 b_out = a_out @ self.lora_B[e].T  
+#                 b_out = b_out * self.scaling * gate_weights_flat[:, e: e+1]  
+#                 lora_output += b_out
+#             lora_output = lora_output.reshape(*x_shape[:-1], self.out_features) 
+#             result += lora_output
+#             return result
+#         else:
+#             return F.linear(x, T(self.weight), bias=self.bias)
+#     def get_load_balance_loss(self) -> torch.Tensor:
+#         return self.load_balance_loss * self.load_balance_coeff
 class MoELoRALinear(nn.Linear, LoRALayer):
     def __init__(
         self,
         in_features: int,          
         out_features: int,         
-        r: int = 0,                
+        r: int = 16,                
         lora_alpha: int = 1,       
         lora_dropout: float = 0.,  
-        expert_num: int = 4,       
-        gate_temp: float = 6.0,    
-        top_k: int = 2,  # 新增：默认k=2
+        expert_num: int = 3,       
         fan_in_fan_out: bool = False,  
         merge_weights: bool = True,    
-        load_balance_coeff: float = 0.005,   #0.01
         **kwargs
     ):
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
         self.fan_in_fan_out = fan_in_fan_out
         self.expert_num = expert_num
-        self.gate_temp = gate_temp
-        # 新增：保存top_k参数
-        self.top_k = top_k
-        self.load_balance_coeff = load_balance_coeff
-        self.load_balance_loss = torch.tensor(0.0, device=self.weight.device)
-
-        self.per_expert_r = r // expert_num if (r > 0 and expert_num > 0) else 0
+        self.expert_id = 0
+        self.per_expert_r = [5, 5, 6] if expert_num == 3 else (r // expert_num if (r > 0 and expert_num > 0) else 0)
+    
         if r > 0:
-            assert r % expert_num == 0
-            self.scaling = self.lora_alpha / self.r  
-            self.lora_A = nn.ParameterList([
-                nn.Parameter(self.weight.new_zeros((self.per_expert_r, in_features)))
-                for _ in range(self.expert_num)
-            ])
-            self.lora_B = nn.ParameterList([
-                nn.Parameter(self.weight.new_zeros((out_features, self.per_expert_r)))
-                for _ in range(self.expert_num)
-            ])
-            # self.gate_mlp = nn.Sequential(
-            #     nn.Linear(in_features, self.gate_hidden_dim),  
-            #     nn.ReLU(),
-            #     nn.Dropout(0.1),  # 新增dropout
-            #     nn.Linear(self.gate_hidden_dim, expert_num)    
-            # )
-            # 优化后（小样本专用）
-            # self.gate_mlp = nn.Sequential(
-            #     nn.Linear(in_features, self.expert_num, bias=False),  # 直接映射，无隐藏层
-            #     nn.Softmax(dim=-1)
-            # )g
-            self.gate_linear = nn.Linear(in_features, self.expert_num)  # 仅一层线性层
-            self.weight.requires_grad = False
+           self.scaling = self.lora_alpha / self.r  
+           self.lora_A = nn.ParameterList()
+           self.lora_B = nn.ParameterList()
+           for e in range(self.expert_num):
+               curr_r = self.per_expert_r[e] if expert_num == 3 else self.per_expert_r
+               self.lora_A.append(nn.Parameter(self.weight.new_zeros((curr_r, in_features))))
+               self.lora_B.append(nn.Parameter(self.weight.new_zeros((out_features, curr_r))))
+           self.weight.requires_grad = False
         self.reset_parameters()
         if fan_in_fan_out:
             self.weight.data = self.weight.data.transpose(0, 1)  
@@ -566,65 +791,31 @@ class MoELoRALinear(nn.Linear, LoRALayer):
     def reset_parameters(self):
         nn.Linear.reset_parameters(self)
         if hasattr(self, 'r') and self.r > 0:
-            if hasattr(self, 'lora_A') and hasattr(self, 'lora_B'):   # and hasattr(self, 'gate_mlp'):
-                # for a in self.lora_A:
-                #     nn.init.kaiming_uniform_(a, a=math.sqrt(5))
-                # for b in self.lora_B:
-                #     nn.init.zeros_(b)
-                # for e in range(self.expert_num):
-                #     # 不同专家用不同初始化种子
-                #     torch.manual_seed(42 + e)
-                #     nn.init.kaiming_uniform_(self.lora_A[e], a=math.sqrt(5) * (e+1))
-                #     nn.init.zeros_(self.lora_B[e])
-                # torch.manual_seed(torch.initial_seed())  # 恢复随机种子
+            if hasattr(self, 'lora_A') and hasattr(self, 'lora_B'):
                 base_coeff = math.sqrt(5) * 0.1  # 匹配语音特征±10的量级
                 noise_level = 1e-3                # 匹配差分特征±1的量级
                 param_clip = 0.05                # 语音特征的合理参数范围
+                
+                # 3专家的差异化初始化（按你的分配方案：0=轻度，1=中度，2=重度）
                 for e in range(self.expert_num):
                     seed = 42 + e * 100
                     torch.manual_seed(seed)
-                    if self.expert_num == 2:
-                        if e == 0:
-                            nn.init.kaiming_uniform_(self.lora_A[e], a=base_coeff * 2)  # 稍大系数，增强鲁棒性
-                            nn.init.zeros_(self.lora_B[e])  # 无偏移，保证稳定性
-                        else:
-                            nn.init.kaiming_normal_(self.lora_A[e], a=base_coeff * 0.5)  # 小系数，聚焦细节
-                            noise = torch.randn_like(self.lora_A[e]) * noise_level
-                            self.lora_A[e].data = self.lora_A[e].data + noise
-                            nn.init.normal_(self.lora_B[e], mean=0, std=noise_level / 10)  # 更小的B层噪声      
-                    elif self.expert_num == 4:
-                        if e == 0:
+                    if self.expert_num == 3:
+                        if e == 0:  # 专家0（轻度病理）：强鲁棒性
                             nn.init.kaiming_uniform_(self.lora_A[e], a=base_coeff * 2)
                             nn.init.zeros_(self.lora_B[e])
-                        elif e == 1:
+                        elif e == 1:  # 专家1（中度病理）：聚焦细节
                             nn.init.kaiming_normal_(self.lora_A[e], a=base_coeff * 0.5)
                             noise = torch.randn_like(self.lora_A[e]) * noise_level
                             self.lora_A[e].data = self.lora_A[e].data + noise
                             nn.init.normal_(self.lora_B[e], mean=0, std=noise_level / 10)
-                        elif e == 2:
-                            nn.init.orthogonal_(self.lora_A[e], gain=0.1)  # 正交适配时序连续性
-                            nn.init.uniform_(self.lora_B[e], a=-noise_level/5, b=noise_level/5)
-                        else:
-                            nn.init.constant_(self.lora_A[e], val=0.01 * (e+1))  # 固定常数偏移
-                            noise = torch.randn_like(self.lora_A[e]) * noise_level * 2
+                        else:  # 专家2（重度病理）：高容错性
+                            nn.init.orthogonal_(self.lora_A[e], gain=0.08)
+                            noise = torch.randn_like(self.lora_A[e]) * (noise_level * 1.5)
                             self.lora_A[e].data = self.lora_A[e].data + noise
-                            nn.init.constant_(self.lora_B[e], val=noise_level / 20)
+                            nn.init.uniform_(self.lora_B[e], a=-noise_level/8, b=noise_level/8)
                     self.lora_A[e].data = self.lora_A[e].data.clamp(-param_clip, param_clip)
                 torch.manual_seed(torch.initial_seed())
-                # for m in self.gate_mlp:
-                #     if isinstance(m, nn.Linear):
-                #         nn.init.xavier_uniform_(m.weight, gain=0.1)  # 降低初始化增益
-                #         if m.bias is not None:
-                #             nn.init.zeros_(m.bias)
-
-    def _get_gate_weights(self, x: torch.Tensor) -> torch.Tensor:
-        x_reshaped = x.reshape(-1, x.shape[-1])  # [B*L, D] → 展平序列维度，便于gate_mlp计算
-        # gate_weights = self.gate_mlp(x_reshaped)  # gate_mlp: D → gate_hidden_dim → expert_num
-        gate_weights = self.gate_linear(x_reshaped)
-        gate_weights = gate_weights.reshape(*x.shape[:-1], self.expert_num)  # 核心：匹配输入的前N维
-        gate_weights = torch.softmax(gate_weights / self.gate_temp, dim=-1)
-        return gate_weights
-    
     def train(self, mode: bool = True):
         def T(w): 
             return w.transpose(0, 1) if self.fan_in_fan_out else w
@@ -633,21 +824,15 @@ class MoELoRALinear(nn.Linear, LoRALayer):
             if self.merge_weights and self.merged:
                 if self.r == 0:
                     return
-                dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
-                gate_weights = self._get_gate_weights(dummy_x)  
-                for e in range(self.expert_num):
-                    delta_W = T(self.lora_B[e] @ self.lora_A[e]) 
-                    self.weight.data -= delta_W * self.scaling * gate_weights[0, e]
+                delta_W = T(self.lora_B[self.expert_id] @ self.lora_A[self.expert_id]) 
+                self.weight.data -= delta_W * self.scaling
                 self.merged = False
         else:
             if self.merge_weights and not self.merged:
                 if self.r == 0:
                     return
-                dummy_x = torch.randn(1, self.in_features, device=self.weight.device)
-                gate_weights = self._get_gate_weights(dummy_x)  
-                for e in range(self.expert_num):
-                    delta_W = T(self.lora_B[e] @ self.lora_A[e])  
-                    self.weight.data += delta_W * self.scaling * gate_weights[0, e]
+                delta_W = T(self.lora_B[self.expert_id] @ self.lora_A[self.expert_id]) 
+                self.weight.data += delta_W * self.scaling
                 self.merged = True
 
     def forward(self, x: torch.Tensor):
@@ -656,136 +841,309 @@ class MoELoRALinear(nn.Linear, LoRALayer):
         result = F.linear(x, T(self.weight), bias=self.bias)
         if self.r > 0 and not self.merged:
             x_dropout = self.lora_dropout(x)  
-            gate_weights = self._get_gate_weights(x_dropout)
             x_shape = x_dropout.shape
             x_flat = x_dropout.reshape(-1, x_shape[-1])  
-            gate_weights_flat = gate_weights.reshape(-1, self.expert_num)
-            # a. 筛选前k个专家的权重和索引
-            topk_vals, topk_indices = torch.topk(
-                gate_weights_flat, 
-                k=self.top_k, 
-                dim=-1,  # 沿专家维度筛选
-                largest=True  # 选权重最大的k个
-            )
-            # b. 构建掩码：仅保留前k个专家的权重，其余置0
-            gate_weights_masked = torch.zeros_like(gate_weights_flat)
-            # scatter_：将topk_vals填充到topk_indices对应的位置
-            gate_weights_masked.scatter_(
-                dim=-1, 
-                index=topk_indices, 
-                src=topk_vals
-            )
-            # c. 替换原有gate_weights_flat为掩码后的版本
-            gate_weights_flat = gate_weights_masked
-            
-            
-            # 5. 计算负载均衡损失
-            expert_selected = (gate_weights_masked > 0).float().sum(dim=0)
-            if expert_selected.sum() > 0:
-                # expert_selected_ratio = expert_selected / expert_selected.sum()
-                # target_ratio = torch.ones_like(expert_selected_ratio) / self.expert_num
-                # self.load_balance_loss = F.mse_loss(expert_selected_ratio, target_ratio)
-                expert_selected_ratio = expert_selected / (expert_selected.sum() + 1e-8)  # 分母防0
-                expert_selected_ratio = expert_selected_ratio.clamp(min=1e-8)  # 分子防0，避免log(0)
-                target_ratio = torch.ones_like(expert_selected_ratio) / self.expert_num
-                target_ratio = target_ratio.clamp(min=1e-8)  # 目标分布也防0（兜底）
-                # self.load_balance_loss = F.kl_div(
-                #     expert_selected_ratio.log(),  # 输入1：对数概率
-                #     target_ratio,                # 输入2：目标概率
-                #     reduction="mean",            # 替换batchmean→mean（无批次维度）
-                #     log_target=False             # 显式声明target不是对数概率（默认False，可省略）
-                # )
-                ratio_loss = F.kl_div(
-                    expert_selected_ratio.log(),  # 输入1：对数概率
-                    target_ratio,                # 输入2：目标概率
-                    reduction="mean",            # 替换batchmean→mean（无批次维度）
-                    log_target=False             # 显式声明target不是对数概率（默认False，可省略）
-                )
-                # # 新增：专家输出差异损失（鼓励专家学不同特征）
-                # expert_outputs = []
-                # for e in range(self.expert_num):
-                #     a_out = x_flat @ self.lora_A[e].T
-                #     b_out = a_out @ self.lora_B[e].T
-                #     expert_outputs.append(b_out)
-                # expert_outputs = torch.stack(expert_outputs, dim=1)  # [B*L, expert_num, out_features]
-                # # 计算专家间的余弦相似度（越小越好）
-                # sim_matrix = F.cosine_similarity(expert_outputs.unsqueeze(1), expert_outputs.unsqueeze(2), dim=-1)
-                # diversity_loss = (sim_matrix.sum() - self.expert_num) / (self.expert_num * (self.expert_num - 1))
-                # # 总负载均衡损失：比例均衡（低权重） + 特征多样性（高权重）
-                # self.load_balance_loss = 0.1 * ratio_loss + 0.9 * diversity_loss
-                diversity_loss = 0.0
-                count = 0
 
-                # for e1 in range(self.expert_num):
-                #     for e2 in range(e1+1, self.expert_num):  
-                #         a_out1 = x_flat @ self.lora_A[e1].T
-                #         b_out1 = a_out1 @ self.lora_B[e1].T
-                #         a_out2 = x_flat @ self.lora_A[e2].T
-                #         b_out2 = a_out2 @ self.lora_B[e2].T
-                #         sim = F.cosine_similarity(b_out1, b_out2, dim=-1).mean()
-                #         diversity_loss += sim
-                #         count += 1
-                # diversity_loss = diversity_loss / count if count > 0 else 0.0
-                # diversity_loss = diversity_loss.clamp(min=0.0, max=1.0)
-                with torch.no_grad():
-                    expert_outs = []
-                    for e in range(self.expert_num):
-                        a_out = x_flat @ self.lora_A[e].T
-                        b_out = a_out @ self.lora_B[e].T
-                        b_out_mean = b_out.mean(dim=0)  # 仅保留特征维度均值
-                        expert_outs.append(b_out_mean)
-                        del a_out, b_out
-                        torch.cuda.empty_cache()  # 清理显存碎片
-                    for e1 in range(self.expert_num):
-                        for e2 in range(e1+1, self.expert_num):
-                            sim = F.cosine_similarity(expert_outs[e1], expert_outs[e2], dim=-1).item()  # 标量输出
-                            diversity_loss += sim
-                            count += 1
-                diversity_loss = diversity_loss / count if count > 0 else 0.0
-                diversity_loss = torch.tensor(diversity_loss, device=x.device, dtype=torch.float32).clamp(min=0.0, max=1.0)
-                self.load_balance_loss = 0.01 * ratio_loss + 0.99 * diversity_loss  
-            else:
-                self.load_balance_loss = torch.tensor(0.0, device=x.device)
-            
-            explore_prob = 0.1 #0.01  
-            explore_mask = (torch.rand_like(gate_weights_flat[:,0]) < explore_prob).unsqueeze(-1)
-            if explore_mask.any():  
-                # random_indices = torch.randint(
-                #     0, self.expert_num, 
-                #     size=gate_weights_flat.shape[:-1],  
-                #     device=x.device
-                # )
-                expert_selected_ratio = expert_selected / (expert_selected.sum() + 1e-8)
-                explore_probs = 1 - expert_selected_ratio
-                explore_probs = explore_probs / (explore_probs.sum() + 1e-8)
-                explore_probs_expanded = explore_probs.unsqueeze(0).repeat(gate_weights_flat.shape[0], 1)
-                mask_squeezed = explore_mask.squeeze(-1)
-                random_indices = torch.multinomial(
-                    explore_probs_expanded[mask_squeezed],
-                    num_samples=1,
-                    replacement=True,
-                )
-                random_indices_full = torch.zeros( (gate_weights_flat.shape[0], 1), dtype=torch.long, device=x.device)
-                random_indices_full[mask_squeezed, :] = random_indices
-                
-                random_vals = torch.zeros_like(gate_weights_flat)
-                random_vals.scatter_(
-                    dim=-1,  # 在最后一维（专家维度）填充
-                    index=random_indices_full,  # [B*L, 1]（2D）
-                    src=torch.ones_like(random_indices_full, dtype=random_vals.dtype)  # 权重设为1，维度匹配
-                )
-                gate_weights_flat = torch.where(explore_mask, random_vals, gate_weights_flat)
-
-            lora_output = torch.zeros(x_flat.shape[0], self.out_features, device=x_flat.device, dtype=x_flat.dtype)
-            for e in range(self.expert_num):
-                a_out = x_flat @ self.lora_A[e].T  
-                b_out = a_out @ self.lora_B[e].T  
-                b_out = b_out * self.scaling * gate_weights_flat[:, e: e+1]  
-                lora_output += b_out
+            expert_id = self.expert_id
+            lora_output = torch.zeros(x_flat.shape[0], self.out_features, device=x_flat.device)
+            a_out = x_flat @ self.lora_A[expert_id].T
+            b_out = a_out @ self.lora_B[expert_id].T
+            b_out = b_out * self.scaling
+            lora_output += b_out
             lora_output = lora_output.reshape(*x_shape[:-1], self.out_features) 
             result += lora_output
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
-    def get_load_balance_loss(self) -> torch.Tensor:
-        return self.load_balance_loss * self.load_balance_coeff
+class GoRALinear(nn.Linear, LoRALayer):
+    def __init__(
+        self, 
+        in_features: int, 
+        out_features: int, 
+        r: int = 0, 
+        lora_alpha: int = 1, 
+        lora_dropout: float = 0.,
+        fan_in_fan_out: bool = False,
+        merge_weights: bool = True,
+        gora_init_method: str = 'vanilla',  # vanilla/grad_compress/grad_svd
+        gora_rank_stablize: bool = False,   # 是否对秩做平方根缩放
+        **kwargs
+    ):
+        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                           merge_weights=merge_weights)
+
+        self.fan_in_fan_out = fan_in_fan_out
+        self.gora_init_method = gora_init_method
+        self.gora_rank_stablize = gora_rank_stablize
+        self.grad_stored = None  # 存储累积的梯度
+        self.grad_steps = 0      # 梯度累积步数
+        self.lora_A = None
+        self.lora_B = None
+        self.scaling = 0.
+        self._forward_output = None  # 新增：存储前向输出张量
+        self._output_hook_handle = None  # 钩子句柄初始化为None
+        self._grad_hook_func = None      # 复用的钩子函数初始化为None
+        if r > 0:
+            self._init_lora_params()
+            self.weight.requires_grad = False
+        
+        self.reset_parameters()
+        if fan_in_fan_out:
+            self.weight.data = self.weight.data.transpose(0, 1)
+
+    def _init_lora_params(self):
+        """初始化 LoRA 参数（抽离便于后续动态更新）"""
+        self.lora_A = nn.Parameter(self.weight.new_zeros((self.r, self.in_features)))
+        self.lora_B = nn.Parameter(self.weight.new_zeros((self.out_features, self.r)))
+        scale_rank = self.r
+        if self.gora_rank_stablize:
+            scale_rank = math.sqrt(scale_rank)
+        self.scaling = self.lora_alpha / scale_rank
+
+    def reset_parameters(self):
+        nn.Linear.reset_parameters(self)
+        if hasattr(self, 'lora_A') and self.lora_A is not None:
+            if self.gora_init_method == 'vanilla':
+                nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+                nn.init.zeros_(self.lora_B)
+            # 其他 GoRA 初始化方式需先存储梯度，在 dynamic_init 中执行
+
+    # def register_gradient_hook(self):      #记录权重梯度
+    #     def grad_hook(grad):
+    #         if self.grad_stored is None:
+    #             self.grad_stored = grad.detach().clone()
+    #         else:
+    #             self.grad_stored += grad.detach().clone()
+    #         self.grad_steps += 1
+    #         return grad
+    #     hook_handle = self.weight.register_hook(grad_hook)
+    #     return hook_handle
+    def register_gradient_hook(self):      
+        def output_grad_hook(grad):
+            if hasattr(self, '_forward_x') and self._forward_x is not None:
+                x = self._forward_x.detach()
+                grad = grad.detach()
+                if x.dim() == 3:
+                    x_flat = x.reshape(-1, x.shape[-1])
+                    grad_flat = grad.reshape(-1, grad.shape[-1])
+                elif x.dim() == 2:
+                    x_flat = x
+                    grad_flat = grad
+                else:
+                    print(f"不支持的张量维度:x.dim()={x.dim()}")
+                    return grad
+                weight_grad = torch.matmul(grad_flat.mT, x_flat) / x_flat.shape[0]
+                if self.grad_stored is None:
+                    self.grad_stored = weight_grad
+                else:
+                    self.grad_stored += weight_grad
+                self.grad_steps += 1
+            return grad
+        # self._output_hook_handle = None
+        if not hasattr(self, '_grad_hook_func'):
+            self._grad_hook_func = output_grad_hook
+        return output_grad_hook
+
+    def compute_importance(self, importance_type: str = 'union_mean') -> float:
+        """计算层重要性（梯度驱动秩分配的核心）"""
+        if self.grad_stored is None:
+            print(f"层 {self.name} 未存储梯度，返回重要性0")
+            return 0.0
+        if self.grad_steps == 0:
+            print(f"层 {self.name} 梯度累积步数为0，返回重要性0")
+            return 0.0
+        if self.grad_steps > 1:
+            grad = self.grad_stored / self.grad_steps  # 累积梯度和 → 均值
+        else:
+            grad = self.grad_stored  # 仅1步梯度，无需归一化
+        param = self.weight.data
+        if torch.isnan(grad).any() or torch.isinf(grad).any():
+            print(f"层 {self.name} 梯度包含NaN/Inf，替换为0")
+            grad = torch.nan_to_num(grad, nan=0.0, posinf=1e-6, neginf=-1e-6)
+        if torch.isnan(param).any() or torch.isinf(param).any():
+            print(f"层 {self.name} 参数包含NaN/Inf，替换为0")
+            param = torch.nan_to_num(param, nan=0.0, posinf=1e-6, neginf=-1e-6)
+        try:
+            if importance_type == 'union_mean':
+                param_mean = torch.mean(torch.abs(param)).clamp(min=1e-8)  # 兜底：避免0
+                grad_mean = torch.mean(torch.abs(grad)).clamp(min=1e-8)
+                importance = (param_mean * grad_mean * 1e8).item()
+                # importance = (param_mean * grad_mean).item()
+            elif importance_type == 'grad_frobenius':
+                grad_norm = torch.linalg.matrix_norm(grad).item()
+                importance = grad_norm / grad.numel()  # 除以元素数，避免大矩阵范数过大
+            elif importance_type == 'grad_nuc':
+                grad_norm = torch.linalg.matrix_norm(grad, ord='nuc').item()
+                importance = grad_norm / grad.numel()
+            else:
+                print(f"不支持的重要性类型：{importance_type}，返回0")
+                return 0.0
+    
+        except Exception as e:
+            print(f"层 {self.name} 计算重要性失败：{str(e)}，返回0")
+            return 0.0
+        importance = max(importance, 1e-6)
+        print(f"层 {self.name} 重要性({importance_type})：{importance:.6f}")
+        return importance
+
+    def dynamic_init(self, target_rank: int, stable_gamma: float = 16.):
+        """
+        动态初始化 LoRA 参数(GoRA 核心）
+        :param target_rank: 自适应分配的目标秩
+        :param stable_gamma: 稳定化系数（防止梯度初始化值过大）
+        """
+        if target_rank <= 0:
+            self.r = 0
+            self.lora_A = None
+            self.lora_B = None
+            return
+        self.r = target_rank
+        self._init_lora_params()
+        
+        if self.grad_stored is None or self.grad_steps == 0:
+            self.reset_parameters()
+            return
+
+        grad = self.grad_stored / self.grad_steps
+        grad = grad.to(self.weight.device, dtype=self.weight.dtype)
+        
+        if self.gora_init_method == 'grad_compress':
+            # GoRA 核心：梯度压缩初始化 B = G @ (A^T A + εI)^{-1} A^T
+            # 1. 初始化 A（保持原有 kaiming_uniform）
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            # 2. 计算 A 的伪逆
+            A_T = self.lora_A.T
+            AAT = torch.matmul(self.lora_A, A_T)
+            AAT_inv = torch.linalg.pinv(AAT + 1e-8 * torch.eye(self.r).to(self.weight.device))
+            AAT_inv_AT = torch.matmul(A_T, AAT_inv)
+            # 3. 计算 B（梯度压缩）
+            self.lora_B.data = torch.matmul(grad, AAT_inv_AT)
+            # 4. 稳定化缩放
+            self.lora_B.data *= stable_gamma / self.lora_alpha
+            
+        elif self.gora_init_method == 'grad_svd':
+            U, S, V = torch.svd_lowrank(grad.float(), q=4*self.r, niter=4)
+            V = V.T
+            # 取前 r 个奇异向量初始化
+            self.lora_B.data = U[:, :self.r].to(self.weight.dtype)
+            self.lora_A.data = V[self.r:2*self.r, :].to(self.weight.dtype)
+            # 稳定化缩放
+            scale = math.pow(self.out_features, 0.25) / math.sqrt(stable_gamma)
+            self.lora_A.data *= scale
+            self.lora_B.data *= scale
+        
+        # 清除已存储的梯度（避免重复使用）
+        self.grad_stored = None
+        self.grad_steps = 0
+
+    def train(self, mode: bool = True):
+        def T(w):
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
+        nn.Linear.train(self, mode)
+        if mode:
+            if self.merge_weights and self.merged:
+                if self.r > 0:
+                    self.weight.data -= T(self.lora_B @ self.lora_A) * self.scaling
+                self.merged = False
+        else:
+            if self.merge_weights and not self.merged:
+                if self.r > 0:
+                    self.weight.data += T(self.lora_B @ self.lora_A) * self.scaling
+                self.merged = True       
+
+    def forward(self, x: torch.Tensor):
+        """保持原有 forward 逻辑不变"""
+        def T(w):
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
+        self._forward_x = x
+        if self.r > 0 and not self.merged:
+            result = F.linear(x, T(self.weight), bias=self.bias)            
+            result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+        else:
+            result = F.linear(x, T(self.weight), bias=self.bias)
+        if self.training:
+            if self._output_hook_handle is None:
+                hook_func = self.register_gradient_hook()
+                self._output_hook_handle = result.register_hook(hook_func)
+        return result
+        # if self.r > 0 and not self.merged:
+        #     result = F.linear(x, T(self.weight), bias=self.bias)            
+        #     result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+        #     if self._output_hook_handle is None and self.training:
+        #         hook_func = self.register_gradient_hook()
+        #         self._output_hook_handle = result.register_hook(hook_func)
+        #     return result
+        # else:
+        #     # return F.linear(x, T(self.weight), bias=self.bias)
+        #     result = F.linear(x, T(self.weight), bias=self.bias)
+        #     if self._output_hook_handle is None and self.training:
+        #         hook_func = self.register_gradient_hook()
+        #         self._output_hook_handle = result.register_hook(hook_func)
+        #     return result
+
+# ---------------------- 辅助函数：全局秩分配 ----------------------
+def allocate_ranks_by_importance(
+    model: nn.Module,
+    total_param_budget: int,
+    importance_type: str = 'union_mean',
+    min_rank: int = 1,
+    max_rank: int = 64,
+    param_tolerance: float = 0.05  # 新增：参数量浮动容忍度（5%）
+) -> dict:
+    # 1. 收集层信息（重要性+维度系数）
+    layer_info = {}
+    total_weighted_importance = 0.
+    for name, module in model.named_modules():
+        if isinstance(module, GoRALinear) and module.r > 0:
+            imp = module.compute_importance(importance_type)
+            dim_coeff = module.in_features + module.out_features
+            weighted_imp = imp * dim_coeff
+            layer_info[name] = {
+                "imp": imp,
+                "dim_coeff": dim_coeff,
+                "weighted_imp": weighted_imp
+            }
+            total_weighted_importance += weighted_imp
+    
+    # 2. 按加权重要性分配秩（先不微调）
+    named_ranks = {}
+    current_total_params = 0
+    for name, info in layer_info.items():
+        layer_param_budget = (info["weighted_imp"] / total_weighted_importance) * total_param_budget
+        rank = round(layer_param_budget / info["dim_coeff"])
+        rank = max(min(rank, max_rank), min_rank)
+        named_ranks[name] = rank
+        current_total_params += rank * info["dim_coeff"]
+    
+    # 3. 计算偏差，仅当超过容忍度时微调
+    param_diff = total_param_budget - current_total_params
+    abs_diff_ratio = abs(param_diff) / total_param_budget  # 偏差比例
+    
+    if abs_diff_ratio > param_tolerance:
+        # 偏差超过5%，才进行微调（逻辑和之前一致，但只微调到容忍度内）
+        sorted_layers = sorted(layer_info.keys(), key=lambda k: layer_info[k]["weighted_imp"], reverse=True)
+        for layer_name in sorted_layers:
+            if abs_diff_ratio <= param_tolerance:
+                break
+            info = layer_info[layer_name]
+            current_rank = named_ranks[layer_name]
+            param_per_rank = info["dim_coeff"]
+            
+            if param_diff > 0 and current_rank < max_rank:
+                named_ranks[layer_name] += 1
+                current_total_params += param_per_rank
+            elif param_diff < 0 and current_rank > min_rank:
+                named_ranks[layer_name] -= 1
+                current_total_params -= param_per_rank
+            
+            # 更新偏差比例
+            param_diff = total_param_budget - current_total_params
+            abs_diff_ratio = abs(param_diff) / total_param_budget
+    # 偏差≤5%，直接放行
+    
+    # 可选：打印偏差信息（调试用）
+    final_diff_ratio = abs(total_param_budget - current_total_params) / total_param_budget
+    print(f"参数量偏差比例：{final_diff_ratio:.2%}（容忍度：{param_tolerance:.2%}）")
+    
+    return named_ranks

@@ -34,6 +34,7 @@ from espnet2.layers.create_adapter import create_adapter
 from espnet2.main_funcs.collect_stats import collect_stats
 from espnet2.optimizers.optim_groups import configure_optimizer
 from espnet2.optimizers.loraplus import create_loraplus_optimizer
+from espnet2.optimizers.moelora import create_moelora_optimizer
 from espnet2.optimizers.sgd import SGD
 from espnet2.samplers.build_batch_sampler import (
     BATCH_TYPES,
@@ -716,7 +717,7 @@ class AbsTask(ABC):
             type=str,
             default="lora",
             help="Adapter Name",
-            choices=["lora", "houlsby","vera","melora","moelora"],
+            choices=["lora", "houlsby","vera","melora","moelora","gora"],
         )
         group.add_argument(
             "--save_strategy",
@@ -1061,6 +1062,73 @@ class AbsTask(ABC):
             help="The ratio of learning rate for LoraPlus optimizer. "
             "This is the ratio ηB/ηA where ηA (lr) is the optimizer learning rate.",
         )
+        group.add_argument(
+            "--moelora_lr_coeff",
+            type=float,
+            default=0.6,
+            help="The coefficient of learning rate for MoE-LoRA (Attention O layer). "
+            "This is the ratio η_MoE/η_LoRA where η_LoRA (lr) is the base learning rate of single LoRA. "
+            "Recommended value: 0.5~0.8 (smaller than 1.0 to stabilize MoE-LoRA training).",
+        )
+        group.add_argument(
+            "--gate_lr_coeff",
+            type=float,
+            default=0.3,
+            help="The coefficient of learning rate for MoE gate network (based on MoE-LoRA lr). "
+            "This is the ratio η_gate/η_MoE where η_MoE = lr × moelora_lr_coeff. "
+            "Recommended value: 0.2~0.3 (smaller than 1.0 to avoid gate weight oscillation).",
+        )
+        group = parser.add_argument_group("GoRA related")  #===========================GoRA参数设置添加======================
+        group.add_argument(
+            "--gora_total_param_budget",
+            type=int,
+            default=128,
+            help="Total param budget for GoRA adaptive rank allocation"
+        )
+        group.add_argument(
+            "--gora_grad_steps",
+            type=int,
+            default=4,
+            help="Steps to accumulate gradient for GoRA importance calculation"
+        )
+        group.add_argument(
+            "--gora_min_rank",
+            type=int,
+            default=2,
+            help="Minimum rank per LoRA layer in GoRA"
+        )
+        group.add_argument(
+            "--gora_max_rank",
+            type=int,
+            default=64,
+            help="Maximum rank per LoRA layer in GoRA"
+        )
+        group.add_argument(
+            "--gora_importance_type",
+            type=str,
+            default="union_mean",
+            choices=["union_mean", "grad_frobenius", "grad_nuc"],
+            help="Importance type for GoRA rank allocation"
+        )
+        group.add_argument(
+            "--gora_stable_gamma",
+            type=float,
+            default=16.0,
+            help="Stable gamma for GoRA gradient initialization"
+        )
+        group.add_argument(
+            "--gora_init_method",
+            type=str,
+            default="grad_compress",
+            choices=["vanilla", "grad_compress", "grad_svd"],
+            help="Initialization method for GoRA (vanilla=original LoRA)"
+        )
+        group.add_argument(
+            "--gora_rank_stablize",
+            type=str2bool,
+            default=True,
+            help="Whether to stabilize rank by sqrt(rank) in GoRA scaling"
+        )  #=================================================================
         for i in range(1, cls.num_optimizers + 1):
             suf = "" if i == 1 else str(i)
             group.add_argument(
@@ -1125,7 +1193,11 @@ class AbsTask(ABC):
                 )
             else:
                 optim = optim_class(model.parameters(), **args.optim_conf)
-                # loraplus_lr_ratio = args.optim_conf.get('loraplus_lr_ratio', 16.0)
+                # optim = create_moelora_optimizer(
+                #     model=model,
+                #     optimizer_cls=optim_class,
+                #     **args.optim_conf
+                # )
                 # optim = create_loraplus_optimizer(
                 #     model=model,
                 #     optimizer_cls=optim_class,
