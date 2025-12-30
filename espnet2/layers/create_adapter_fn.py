@@ -505,7 +505,7 @@ def create_gora_adapter(
         parent_module, target_name, target_module = get_submodules(model, key)
         if not isinstance(target_module, lora.LoRALayer):
             new_module = create_new_gora_module(
-                target_module, rank, alpha, dropout_rate,gora_init_method,gora_rank_stablize,
+                target_module, rank, alpha, dropout_rate,gora_init_method,gora_rank_stablize,layer_name=key  # 传入当前层的完整名称（和 JSON 中的层名一致）
             )
             replace_module(parent_module, target_name, target_module, new_module)
         else:
@@ -517,7 +517,7 @@ def create_gora_adapter(
         )
     lora.mark_only_gora_as_trainable(model,bias_type)
 def create_new_gora_module(
-    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,gora_init_method: str = "vanilla",gora_rank_stablize: bool = False,
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,gora_init_method: str = "vanilla",gora_rank_stablize: bool = False,layer_name: str = ""
 ):
     bias = hasattr(target_module, "bias") and target_module.bias is not None
 
@@ -538,6 +538,7 @@ def create_new_gora_module(
             lora_dropout=dropout_rate,
             gora_init_method=gora_init_method,
             gora_rank_stablize=gora_rank_stablize,
+            layer_name=layer_name
         )
     else:
         raise ValueError(

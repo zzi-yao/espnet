@@ -869,174 +869,56 @@ class GoRALinear(nn.Linear, LoRALayer):
         gora_rank_stablize: bool = False,   # 是否对秩做平方根缩放
         **kwargs
     ):
+        # ====================== 新增：读取预分配秩文件 ======================
+        import json
+        import os
+        rank_file_path = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual/gora_rank_allocation.json"
+        matched_r = r
+        if os.path.exists(rank_file_path):
+            with open(rank_file_path, "r", encoding="utf-8") as f:
+                rank_dict = json.load(f)
+            layer_name = kwargs.pop("layer_name", "")
+            self.name = layer_name  # 绑定层名
+            if layer_name in rank_dict:
+                matched_r = rank_dict[layer_name]
+                print(f"GoRALinear [{layer_name}] 加载预分配秩：{matched_r}（原秩：{r}）")
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
-        LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+        LoRALayer.__init__(self, r=matched_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                            merge_weights=merge_weights)
+        # ====================== 修改结束 ======================
+        # nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        # LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+        #                    merge_weights=merge_weights)
 
         self.fan_in_fan_out = fan_in_fan_out
         self.gora_init_method = gora_init_method
         self.gora_rank_stablize = gora_rank_stablize
         self.grad_stored = None  # 存储累积的梯度
-        self.grad_steps = 0      # 梯度累积步数
-        self.lora_A = None
-        self.lora_B = None
-        self.scaling = 0.
-        self._forward_output = None  # 新增：存储前向输出张量
-        self._output_hook_handle = None  # 钩子句柄初始化为None
-        self._grad_hook_func = None      # 复用的钩子函数初始化为None
-        if r > 0:
-            self._init_lora_params()
+        self.grad_steps = 0      # 梯度累积步数   
+        # self.name = ""   
+        self.name = layer_name
+        # if r > 0:
+        if matched_r > 0:
+            # self._init_lora_params()
+            # self.lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)))
+            # self.lora_B = nn.Parameter(self.weight.new_zeros((out_features, r)))
+            # scale_rank = self.r if not self.gora_rank_stablize else math.sqrt(self.r)
+            self.lora_A = nn.Parameter(self.weight.new_zeros((matched_r, in_features)))  # 改用 matched_r
+            self.lora_B = nn.Parameter(self.weight.new_zeros((out_features, matched_r)))  # 改用 matched_r
+            scale_rank = matched_r if not self.gora_rank_stablize else math.sqrt(matched_r)  # 改用 matched_r
+            self.scaling = self.lora_alpha / scale_rank
             self.weight.requires_grad = False
-        
         self.reset_parameters()
         if fan_in_fan_out:
             self.weight.data = self.weight.data.transpose(0, 1)
 
-    def _init_lora_params(self):
-        """初始化 LoRA 参数（抽离便于后续动态更新）"""
-        self.lora_A = nn.Parameter(self.weight.new_zeros((self.r, self.in_features)))
-        self.lora_B = nn.Parameter(self.weight.new_zeros((self.out_features, self.r)))
-        scale_rank = self.r
-        if self.gora_rank_stablize:
-            scale_rank = math.sqrt(scale_rank)
-        self.scaling = self.lora_alpha / scale_rank
 
     def reset_parameters(self):
         nn.Linear.reset_parameters(self)
-        if hasattr(self, 'lora_A') and self.lora_A is not None:
-            if self.gora_init_method == 'vanilla':
-                nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-                nn.init.zeros_(self.lora_B)
-            # 其他 GoRA 初始化方式需先存储梯度，在 dynamic_init 中执行
-
-    # def register_gradient_hook(self):      #记录权重梯度
-    #     def grad_hook(grad):
-    #         if self.grad_stored is None:
-    #             self.grad_stored = grad.detach().clone()
-    #         else:
-    #             self.grad_stored += grad.detach().clone()
-    #         self.grad_steps += 1
-    #         return grad
-    #     hook_handle = self.weight.register_hook(grad_hook)
-    #     return hook_handle
-    def register_gradient_hook(self):      
-        def output_grad_hook(grad):
-            if hasattr(self, '_forward_x') and self._forward_x is not None:
-                x = self._forward_x.detach()
-                grad = grad.detach()
-                if x.dim() == 3:
-                    x_flat = x.reshape(-1, x.shape[-1])
-                    grad_flat = grad.reshape(-1, grad.shape[-1])
-                elif x.dim() == 2:
-                    x_flat = x
-                    grad_flat = grad
-                else:
-                    print(f"不支持的张量维度:x.dim()={x.dim()}")
-                    return grad
-                weight_grad = torch.matmul(grad_flat.mT, x_flat) / x_flat.shape[0]
-                if self.grad_stored is None:
-                    self.grad_stored = weight_grad
-                else:
-                    self.grad_stored += weight_grad
-                self.grad_steps += 1
-            return grad
-        # self._output_hook_handle = None
-        if not hasattr(self, '_grad_hook_func'):
-            self._grad_hook_func = output_grad_hook
-        return output_grad_hook
-
-    def compute_importance(self, importance_type: str = 'union_mean') -> float:
-        """计算层重要性（梯度驱动秩分配的核心）"""
-        if self.grad_stored is None:
-            print(f"层 {self.name} 未存储梯度，返回重要性0")
-            return 0.0
-        if self.grad_steps == 0:
-            print(f"层 {self.name} 梯度累积步数为0，返回重要性0")
-            return 0.0
-        if self.grad_steps > 1:
-            grad = self.grad_stored / self.grad_steps  # 累积梯度和 → 均值
-        else:
-            grad = self.grad_stored  # 仅1步梯度，无需归一化
-        param = self.weight.data
-        if torch.isnan(grad).any() or torch.isinf(grad).any():
-            print(f"层 {self.name} 梯度包含NaN/Inf，替换为0")
-            grad = torch.nan_to_num(grad, nan=0.0, posinf=1e-6, neginf=-1e-6)
-        if torch.isnan(param).any() or torch.isinf(param).any():
-            print(f"层 {self.name} 参数包含NaN/Inf，替换为0")
-            param = torch.nan_to_num(param, nan=0.0, posinf=1e-6, neginf=-1e-6)
-        try:
-            if importance_type == 'union_mean':
-                param_mean = torch.mean(torch.abs(param)).clamp(min=1e-8)  # 兜底：避免0
-                grad_mean = torch.mean(torch.abs(grad)).clamp(min=1e-8)
-                importance = (param_mean * grad_mean * 1e8).item()
-                # importance = (param_mean * grad_mean).item()
-            elif importance_type == 'grad_frobenius':
-                grad_norm = torch.linalg.matrix_norm(grad).item()
-                importance = grad_norm / grad.numel()  # 除以元素数，避免大矩阵范数过大
-            elif importance_type == 'grad_nuc':
-                grad_norm = torch.linalg.matrix_norm(grad, ord='nuc').item()
-                importance = grad_norm / grad.numel()
-            else:
-                print(f"不支持的重要性类型：{importance_type}，返回0")
-                return 0.0
-    
-        except Exception as e:
-            print(f"层 {self.name} 计算重要性失败：{str(e)}，返回0")
-            return 0.0
-        importance = max(importance, 1e-6)
-        print(f"层 {self.name} 重要性({importance_type})：{importance:.6f}")
-        return importance
-
-    def dynamic_init(self, target_rank: int, stable_gamma: float = 16.):
-        """
-        动态初始化 LoRA 参数(GoRA 核心）
-        :param target_rank: 自适应分配的目标秩
-        :param stable_gamma: 稳定化系数（防止梯度初始化值过大）
-        """
-        if target_rank <= 0:
-            self.r = 0
-            self.lora_A = None
-            self.lora_B = None
-            return
-        self.r = target_rank
-        self._init_lora_params()
-        
-        if self.grad_stored is None or self.grad_steps == 0:
-            self.reset_parameters()
-            return
-
-        grad = self.grad_stored / self.grad_steps
-        grad = grad.to(self.weight.device, dtype=self.weight.dtype)
-        
-        if self.gora_init_method == 'grad_compress':
-            # GoRA 核心：梯度压缩初始化 B = G @ (A^T A + εI)^{-1} A^T
-            # 1. 初始化 A（保持原有 kaiming_uniform）
+        if hasattr(self, 'lora_A'):
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-            # 2. 计算 A 的伪逆
-            A_T = self.lora_A.T
-            AAT = torch.matmul(self.lora_A, A_T)
-            AAT_inv = torch.linalg.pinv(AAT + 1e-8 * torch.eye(self.r).to(self.weight.device))
-            AAT_inv_AT = torch.matmul(A_T, AAT_inv)
-            # 3. 计算 B（梯度压缩）
-            self.lora_B.data = torch.matmul(grad, AAT_inv_AT)
-            # 4. 稳定化缩放
-            self.lora_B.data *= stable_gamma / self.lora_alpha
-            
-        elif self.gora_init_method == 'grad_svd':
-            U, S, V = torch.svd_lowrank(grad.float(), q=4*self.r, niter=4)
-            V = V.T
-            # 取前 r 个奇异向量初始化
-            self.lora_B.data = U[:, :self.r].to(self.weight.dtype)
-            self.lora_A.data = V[self.r:2*self.r, :].to(self.weight.dtype)
-            # 稳定化缩放
-            scale = math.pow(self.out_features, 0.25) / math.sqrt(stable_gamma)
-            self.lora_A.data *= scale
-            self.lora_B.data *= scale
-        
-        # 清除已存储的梯度（避免重复使用）
-        self.grad_stored = None
-        self.grad_steps = 0
-
+            nn.init.zeros_(self.lora_B)
+            # 其他 GoRA 初始化方式需先存储梯度，在 dynamic_init 中执行
     def train(self, mode: bool = True):
         def T(w):
             return w.transpose(0, 1) if self.fan_in_fan_out else w
@@ -1053,34 +935,84 @@ class GoRALinear(nn.Linear, LoRALayer):
                 self.merged = True       
 
     def forward(self, x: torch.Tensor):
-        """保持原有 forward 逻辑不变"""
         def T(w):
             return w.transpose(0, 1) if self.fan_in_fan_out else w
-        self._forward_x = x
         if self.r > 0 and not self.merged:
             result = F.linear(x, T(self.weight), bias=self.bias)            
             result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
         else:
             result = F.linear(x, T(self.weight), bias=self.bias)
-        if self.training:
-            if self._output_hook_handle is None:
-                hook_func = self.register_gradient_hook()
-                self._output_hook_handle = result.register_hook(hook_func)
         return result
-        # if self.r > 0 and not self.merged:
-        #     result = F.linear(x, T(self.weight), bias=self.bias)            
-        #     result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
-        #     if self._output_hook_handle is None and self.training:
-        #         hook_func = self.register_gradient_hook()
-        #         self._output_hook_handle = result.register_hook(hook_func)
-        #     return result
-        # else:
-        #     # return F.linear(x, T(self.weight), bias=self.bias)
-        #     result = F.linear(x, T(self.weight), bias=self.bias)
-        #     if self._output_hook_handle is None and self.training:
-        #         hook_func = self.register_gradient_hook()
-        #         self._output_hook_handle = result.register_hook(hook_func)
-        #     return result
+
+    def compute_importance(self, importance_type: str = 'union_mean') -> float:
+        """计算层重要性（梯度驱动秩分配的核心）"""
+        if self.grad_stored is None or self.grad_steps == 0:
+            return 1e-6  # 兜底，避免0
+        grad = self.grad_stored / self.grad_steps
+        grad = torch.nan_to_num(grad, nan=1e-6, posinf=1e-6, neginf=-1e-6)
+        param = torch.nan_to_num(self.weight.data, nan=1e-6, posinf=1e-6, neginf=-1e-6)
+        if importance_type == 'union_mean':
+            param_mean = torch.mean(torch.abs(param)).clamp(min=1e-8)  # 兜底：避免0
+            grad_mean = torch.mean(torch.abs(grad)).clamp(min=1e-8)
+            # importance = (param_mean * grad_mean * 1e8).item()
+            importance = (param_mean * grad_mean).item()
+        elif importance_type == 'grad_frobenius':
+            grad_norm = torch.linalg.matrix_norm(grad).item()
+            importance = grad_norm / grad.numel()  # 除以元素数，避免大矩阵范数过大
+        elif importance_type == 'grad_nuc':
+            grad_norm = torch.linalg.matrix_norm(grad, ord='nuc').item()
+            importance = grad_norm / grad.numel()
+        else:
+            print(f"不支持的重要性类型：{importance_type}返回0")
+            return 0.0
+        importance = max(importance, 1e-6)
+        print(f"层 {self.name} 重要性({importance_type}):{importance:.6f}")
+        return importance
+
+    def dynamic_init(self, target_rank: int, stable_gamma: float = 16.):
+        """
+        动态初始化 LoRA 参数(GoRA 核心）
+        :param target_rank: 自适应分配的目标秩
+        :param stable_gamma: 稳定化系数（防止梯度初始化值过大）
+        """
+        if target_rank <= 0:
+            self.r = 0
+            self.lora_A = None
+            self.lora_B = None
+            return
+        self.r = target_rank
+        self.lora_A = nn.Parameter(self.weight.new_zeros((self.r, self.in_features)))
+        self.lora_B = nn.Parameter(self.weight.new_zeros((self.out_features, self.r)))
+        scale_rank = self.r if not self.gora_rank_stablize else math.sqrt(self.r)
+        self.scaling = self.lora_alpha / scale_rank
+        
+        if self.grad_stored is None or self.grad_steps == 0:
+            self.reset_parameters()
+            return
+        grad = self.grad_stored / self.grad_steps
+        grad = grad.to(self.weight.device, dtype=self.weight.dtype)
+        
+        if self.gora_init_method == 'grad_compress':
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            A_T = self.lora_A.T
+            AAT = torch.matmul(self.lora_A, A_T)
+            AAT_inv = torch.linalg.pinv(AAT + 1e-8 * torch.eye(self.r).to(self.weight.device))
+            AAT_inv_AT = torch.matmul(A_T, AAT_inv)
+            self.lora_B.data = torch.matmul(grad, AAT_inv_AT)
+            self.lora_B.data *= stable_gamma / self.lora_alpha
+            
+        elif self.gora_init_method == 'grad_svd':
+            U, S, V = torch.svd_lowrank(grad.float(), q=4*self.r, niter=4)
+            V = V.T
+            self.lora_B.data = U[:, :self.r].to(self.weight.dtype)
+            self.lora_A.data = V[self.r:2*self.r, :].to(self.weight.dtype)
+            scale = math.pow(self.out_features, 0.25) / math.sqrt(stable_gamma)
+            self.lora_A.data *= scale
+            self.lora_B.data *= scale
+        self.grad_stored = None
+        self.grad_steps = 0
+
+
 
 # ---------------------- 辅助函数：全局秩分配 ----------------------
 def allocate_ranks_by_importance(
@@ -1136,8 +1068,6 @@ def allocate_ranks_by_importance(
             elif param_diff < 0 and current_rank > min_rank:
                 named_ranks[layer_name] -= 1
                 current_total_params -= param_per_rank
-            
-            # 更新偏差比例
             param_diff = total_param_budget - current_total_params
             abs_diff_ratio = abs(param_diff) / total_param_budget
     # 偏差≤5%，直接放行
