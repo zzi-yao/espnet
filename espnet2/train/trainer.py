@@ -258,10 +258,10 @@ class Trainer:
         #         from loralib.layers import GoRALinear, allocate_ranks_by_importance 
         #         from loralib.utils import mark_only_gora_as_trainable 
         #         gora_cfg = {
-        #             "total_param_budget": getattr(trainer_options, "gora_total_param_budget", 6488064),
+        #             "total_param_budget": getattr(trainer_options, "gora_total_param_budget", 19464192),#6488064
         #             "grad_steps": getattr(trainer_options, "gora_grad_steps", 4),
-        #             "min_rank": getattr(trainer_options, "gora_min_rank", 4),
-        #             "max_rank": getattr(trainer_options, "gora_max_rank", 32),
+        #             "min_rank": getattr(trainer_options, "gora_min_rank", 36),
+        #             "max_rank": getattr(trainer_options, "gora_max_rank", 64),
         #             "importance_type": getattr(trainer_options, "gora_importance_type", "union_mean"),
         #             "stable_gamma": getattr(trainer_options, "gora_stable_gamma", 16.),
         #         }
@@ -352,19 +352,27 @@ class Trainer:
         #             param_tolerance=0.05,
         #         )
         #         logging.info(f"GoRA rank allocation result: {named_ranks}")
-        #         for name, module in model.named_modules():
-        #             if isinstance(module, GoRALinear) and name in named_ranks:
-        #                 module.dynamic_init(
-        #                     target_rank=named_ranks[name],
-        #                     stable_gamma=gora_cfg["stable_gamma"]
-        #                 )
-        #         # scaler = None
-        #         # optimizers[0].zero_grad(set_to_none=True)
+        #         # for name, module in model.named_modules():
+        #         #     if isinstance(module, GoRALinear) and name in named_ranks:
+        #         #         module.dynamic_init(
+        #         #             target_rank=named_ranks[name],
+        #         #             stable_gamma=gora_cfg["stable_gamma"]
+        #         #         )
+        #         scaler = None
+        #         optimizers[0].zero_grad(set_to_none=True)
 
         #         mark_only_gora_as_trainable(model, bias="none") 
         #         for optimizer in optimizers:
         #             optimizer.zero_grad(set_to_none=True)
         #         torch.cuda.empty_cache()
+        #         # # ====================== 新增：保存grad_G（极简版） ======================
+        #         # gradG_all = {}
+        #         # for name, module in model.named_modules():
+        #         #     if isinstance(module, GoRALinear) and module.grad_stored is not None:
+        #         #         gradG_all[name] = module.grad_stored.half()  # float16压缩
+        #         # torch.save(gradG_all, output_dir / "all_gradG.pt")
+        #         # logging.info(f"grad_G合并保存到 {output_dir / 'all_gradG.pt'}，共{len(gradG_all)}层")
+        #         # # ====================== 新增结束 ======================
         #         with open(output_dir / "gora_rank_allocation.json", "w") as f:
         #             json.dump(named_ranks, f, indent=2)
         #         logging.info(f"GoRA initialization finished, rank saved to {output_dir / 'gora_rank_allocation.json'}")
@@ -693,6 +701,9 @@ class Trainer:
         create_graph_in_tensorboard = options.create_graph_in_tensorboard
         distributed = distributed_option.distributed
 
+        # # -------------------------- 新增：裁剪相关计数器（硬编码） --------------------------
+        # step_counter = 0  # 训练步数计数器
+        # # -------------------------- 新增：裁剪相关计数器（硬编码） ------
         if log_interval is None:
             try:
                 log_interval = max(len(iterator) // 20, 10)
@@ -820,6 +831,17 @@ class Trainer:
                     loss *= torch.distributed.get_world_size()
 
                 loss /= accum_grad
+                # # -------------------------- 新增：添加AdaLoRA正交正则化损失 --------------------------
+                # # 遍历模型所有层，累加正交正则化损失
+                # ada_reg_loss = 0.0
+                # # 兼容DDP：取model.module（分布式下model是DDP包装的）
+                # _model = model.module if hasattr(model, 'module') else model
+                # for module in _model.modules():
+                #     if hasattr(module, 'ortho_reg'):
+                #         ada_reg_loss += module.ortho_reg()
+                # # 加到总损失
+                # loss += 0.005 * ada_reg_loss#loss += gamma * ada_reg_loss
+                # # -------------------------- 新增：添加AdaLoRA正交正则化损失 --------------------------
 
             reporter.register(stats, weight)
 
@@ -916,6 +938,15 @@ class Trainer:
                                 optimizer.step()
                             if isinstance(scheduler, AbsBatchStepScheduler):
                                 scheduler.step()
+                # # -------------------------- 新增代码：和上面的for循环同级缩进（关键） --------------------------
+                # step_counter += 1
+                # if step_counter % 2000 == 0 and step_counter > 0:
+                #     _model = model.module if hasattr(model, 'module') else model
+                #     for module in _model.modules():
+                #         if hasattr(module, 'prune_lambda'):
+                #             module.prune_lambda(k=24)#module.prune_lambda(k=prune_k)
+                #     # logging.info(f"AdaLoRA prune at step {step_counter}, keep top-{prune_k} lambda")
+                # # -------------------------- 新增代码：和上面的for循环同级缩进（关键） --------------------------
                 for iopt, optimizer in enumerate(optimizers):
                     if optim_idx is not None and iopt != optim_idx:
                         continue

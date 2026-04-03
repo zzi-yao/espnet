@@ -255,6 +255,54 @@ def create_new_lora_module(
 
     return new_module
 @typechecked
+# def create_vera_adapter(
+#     model: torch.nn.Module,
+#     rank: int = 8,
+#     alpha: int = 8,
+#     dropout_rate: float = 0.0,
+#     target_modules: List[str] = ["query"],
+#     bias_type: Optional[str] = "none",
+# ):
+#     is_traget_module_exists = False
+#     key_list = [key for key, _ in model.named_modules()]
+#     shared_cache: Dict[Tuple[int, int], Tuple[Tensor, Tensor]] = {}
+#     for key in key_list:
+#         if not check_target_module_exists(key, target_modules):
+#             continue
+
+#         is_traget_module_exists = True
+
+#         parent_module, target_name, target_module = get_submodules(model, key)
+#         if isinstance(target_module, nn.Linear) and not isinstance(target_module, lora.VeRALayer):
+#             if (target_module.in_features, target_module.out_features) not in shared_cache:
+#                 shared_A = torch.empty(rank, target_module.in_features)
+#                 # if target_module.in_features >= 1024:
+#                 #     std = 0.03
+#                 # elif target_module.in_features >= 768:
+#                 #     std = 0.035
+#                 # else:
+#                 #     std = 0.04
+#                 # nn.init.normal_(shared_A, mean=0.0, std=std)
+#                 nn.init.normal_(shared_A, mean=0.0, std=0.03)
+#                 # nn.init.kaiming_uniform_(shared_A, a=math.sqrt(5))
+#                 shared_B = torch.empty(target_module.out_features, rank)
+#                 nn.init.kaiming_uniform_(shared_B, a=math.sqrt(5))
+#                 shared_cache[(target_module.in_features, target_module.out_features)] = (shared_A, shared_B)
+#             else:
+#                 shared_A, shared_B = shared_cache[(target_module.in_features, target_module.out_features)]
+#             new_module = create_new_vera_module(
+#                 target_module, rank, alpha, dropout_rate, shared_A, shared_B
+#             )
+#             replace_module(parent_module, target_name, target_module, new_module)
+#         else:
+#             continue
+
+#     if not is_traget_module_exists:
+#         raise ValueError(
+#             f"Target modules {target_modules} not found in the base model."
+#         )
+
+#     lora.mark_only_vera_as_trainable(model,bias_type)
 def create_vera_adapter(
     model: torch.nn.Module,
     rank: int = 8,
@@ -265,7 +313,7 @@ def create_vera_adapter(
 ):
     is_traget_module_exists = False
     key_list = [key for key, _ in model.named_modules()]
-    shared_cache: Dict[Tuple[int, int], Tuple[Tensor, Tensor]] = {}
+    shared_cache: Dict[int, Tensor] = {}
     for key in key_list:
         if not check_target_module_exists(key, target_modules):
             continue
@@ -274,16 +322,21 @@ def create_vera_adapter(
 
         parent_module, target_name, target_module = get_submodules(model, key)
         if isinstance(target_module, nn.Linear) and not isinstance(target_module, lora.VeRALayer):
-            if (target_module.in_features, target_module.out_features) not in shared_cache:
-                shared_A = torch.empty(rank, target_module.in_features)
-                nn.init.kaiming_uniform_(shared_A, a=math.sqrt(5))
-                shared_B = torch.empty(target_module.out_features, rank)
-                nn.init.kaiming_uniform_(shared_B, a=math.sqrt(5))
-                shared_cache[(target_module.in_features, target_module.out_features)] = (shared_A, shared_B)
+            if target_module.in_features not in shared_cache:          # ① 只按 in_features 查缓存
+                shared_A = nn.Parameter(torch.empty(rank, target_module.in_features))
+                # nn.init.kaiming_uniform_(shared_A, a=math.sqrt(5))
+                if target_module.in_features >= 1024:
+                    std = 0.03
+                elif target_module.in_features >= 768:
+                    std = 0.035
+                else:
+                    std = 0.04
+                nn.init.normal_(shared_A, mean=0.0, std=std)
+                shared_cache[target_module.in_features] = shared_A     # ② 只存 A
             else:
-                shared_A, shared_B = shared_cache[(target_module.in_features, target_module.out_features)]
+                shared_A = shared_cache[target_module.in_features]     # ③ 复用 A
             new_module = create_new_vera_module(
-                target_module, rank, alpha, dropout_rate, shared_A, shared_B
+                target_module, rank, alpha, dropout_rate, shared_A
             )
             replace_module(parent_module, target_name, target_module, new_module)
         else:
@@ -297,7 +350,7 @@ def create_vera_adapter(
     lora.mark_only_vera_as_trainable(model,bias_type)
 @typechecked
 def create_new_vera_module(
-    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float ,shared_A: torch.Tensor, shared_B: torch.Tensor,
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float ,shared_A: torch.Tensor#, shared_B: torch.Tensor,
 ):
     bias = hasattr(target_module, "bias") and target_module.bias is not None
 
@@ -310,7 +363,7 @@ def create_new_vera_module(
             vera_alpha=alpha,
             vera_dropout=dropout_rate,
             shared_A=shared_A,
-            shared_B=shared_B,
+            # shared_B=shared_B,
         )
     else:
         raise ValueError(
@@ -389,9 +442,6 @@ def create_moelora_adapter(
     model: torch.nn.Module,
     rank: int = 8,
     alpha: int = 8,
-    expert_num: int = 4,
-    # gate_temp: float = 6.0,
-    # top_k: int = 2,  # 新增：默认k=2
     dropout_rate: float = 0.0,
     target_modules: List[str] = ["query"],
     bias_type: Optional[str] = "none",
@@ -407,32 +457,9 @@ def create_moelora_adapter(
         is_traget_module_exists = True
 
         parent_module, target_name, target_module = get_submodules(model, key)
-        # if not isinstance(target_module, lora.LoRALayer):
-        #     new_module = create_moelora_module(
-        #         target_module, rank, alpha, dropout_rate,expert_num,gate_temp,gate_hidden_dim, top_k
-        #     )
-        #     replace_module(parent_module, target_name, target_module, new_module)
-        # else:
-        #     continue
         if not isinstance(target_module, lora.LoRALayer):
-            # is_mlp = any(mlp_key in key for mlp_key in ["mlp.0", "mlp.2"])
-            # is_mlp = any(mlp_key in key for mlp_key in ["attn.out"])
-            # if is_mlp:
-            #     # new_module = create_new_lora_module(
-            #     #     target_module, rank, alpha, dropout_rate
-            #     # )
-            #     new_module = create_moelora_module(
-            #         target_module, rank, alpha, dropout_rate,expert_num  #, gate_temp, top_k, is_o_layer=True
-            #     )
-            # else:
-            #     # new_module = create_moelora_module(
-            #     #     target_module, rank, alpha, dropout_rate,expert_num
-            #     # )
-            #     new_module = create_new_lora_module(
-            #         target_module, rank, alpha, dropout_rate
-            #     )
             new_module = create_moelora_module(
-                    target_module, rank, alpha, dropout_rate,expert_num  #, gate_temp, top_k, is_o_layer=True
+                    target_module, rank, alpha, dropout_rate#,layer_name=key
                 )
 
             replace_module(parent_module, target_name, target_module, new_module)
@@ -447,7 +474,7 @@ def create_moelora_adapter(
     lora.mark_only_moelora_as_trainable(model,bias_type)
 @typechecked
 def create_moelora_module(
-    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,expert_num: int = 4,
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float#,layer_name: str = ""
     # gate_temp: float = 6.0,top_k: int = 2, is_o_layer=False,  # 新增：默认k=2
 ):
     """Create a new lora module for the given target module."""
@@ -468,10 +495,143 @@ def create_moelora_module(
             r=rank,
             lora_alpha=alpha,
             lora_dropout=dropout_rate,
-            expert_num=expert_num,      
-            # gate_temp=gate_temp,   
-            # top_k=top_k,  # 新增：默认k=2
-            # is_o_layer=is_o_layer,
+            # layer_name=layer_name
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
+
+@typechecked
+def create_deegora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.LoRALayer):
+            new_module = create_deegora_module(
+                    target_module, rank, alpha, dropout_rate,layer_name=key
+                )
+
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_deegora_as_trainable(model,bias_type)
+@typechecked
+def create_deegora_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,layer_name: str = ""
+):
+    """Create a new lora module for the given target module."""
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Embedding):
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            lora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.DEEGoRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout_rate,
+            layer_name=layer_name
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
+
+@typechecked
+def create_deelora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.LoRALayer):
+            new_module = create_deelora_module(
+                    target_module, rank, alpha, dropout_rate,layer_name=key
+                )
+
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_deelora_as_trainable(model,bias_type)
+@typechecked
+def create_deelora_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,layer_name: str = ""
+):
+    """Create a new lora module for the given target module."""
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Embedding):
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            lora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.DEELoRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout_rate,
+            layer_name=layer_name
         )
     else:
         raise ValueError(
@@ -505,7 +665,7 @@ def create_gora_adapter(
         parent_module, target_name, target_module = get_submodules(model, key)
         if not isinstance(target_module, lora.LoRALayer):
             new_module = create_new_gora_module(
-                target_module, rank, alpha, dropout_rate,gora_init_method,gora_rank_stablize,layer_name=key  # 传入当前层的完整名称（和 JSON 中的层名一致）
+                target_module, rank, alpha, dropout_rate,gora_init_method,gora_rank_stablize#,layer_name=key  # 传入当前层的完整名称（和 JSON 中的层名一致）
             )
             replace_module(parent_module, target_name, target_module, new_module)
         else:
@@ -517,7 +677,7 @@ def create_gora_adapter(
         )
     lora.mark_only_gora_as_trainable(model,bias_type)
 def create_new_gora_module(
-    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,gora_init_method: str = "vanilla",gora_rank_stablize: bool = False,layer_name: str = ""
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float,gora_init_method: str = "vanilla",gora_rank_stablize: bool = False#,layer_name: str = ""
 ):
     bias = hasattr(target_module, "bias") and target_module.bias is not None
 
@@ -538,7 +698,7 @@ def create_new_gora_module(
             lora_dropout=dropout_rate,
             gora_init_method=gora_init_method,
             gora_rank_stablize=gora_rank_stablize,
-            layer_name=layer_name
+            #layer_name=layer_name
         )
     else:
         raise ValueError(
@@ -548,3 +708,132 @@ def create_new_gora_module(
         )
 
     return new_module
+@typechecked
+def create_adalora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.LoRALayer):
+            new_module = create_adalora_module(
+                target_module, rank, alpha, dropout_rate
+            )
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_adalora_as_trainable(model,bias_type)
+
+@typechecked
+def create_adalora_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float
+):
+    """Create a new lora module for the given target module."""
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Embedding):
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            lora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.AdaLoRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout_rate,
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
+@typechecked
+def create_dora_adapter(
+    model: torch.nn.Module,
+    rank: int = 8,
+    alpha: int = 8,
+    dropout_rate: float = 0.0,
+    target_modules: List[str] = ["query"],
+    bias_type: Optional[str] = "none",
+):
+    is_traget_module_exists = False
+    key_list = [key for key, _ in model.named_modules()]
+
+    for key in key_list:
+        if not check_target_module_exists(key, target_modules):
+            continue
+
+        is_traget_module_exists = True
+
+        parent_module, target_name, target_module = get_submodules(model, key)
+        if not isinstance(target_module, lora.LoRALayer):
+            new_module = create_dora_module(
+                target_module, rank, alpha, dropout_rate
+            )
+            replace_module(parent_module, target_name, target_module, new_module)
+        else:
+            continue
+
+    if not is_traget_module_exists:
+        raise ValueError(
+            f"Target modules {target_modules} not found in the base model."
+        )
+    lora.mark_only_dora_as_trainable(model,bias_type)
+
+@typechecked
+def create_dora_module(
+    target_module: torch.nn.Module, rank: int, alpha: int, dropout_rate: float
+):
+    """Create a new lora module for the given target module."""
+    bias = hasattr(target_module, "bias") and target_module.bias is not None
+
+    if isinstance(target_module, torch.nn.Embedding):
+        new_module = lora.Embedding(
+            target_module.num_embeddings,
+            target_module.embedding_dim,
+            r=rank,
+            lora_alpha=alpha,
+        )
+    elif isinstance(target_module, torch.nn.Linear):
+        new_module = lora.DoRALinear(
+            target_module.in_features,
+            target_module.out_features,
+            bias=bias,
+            r=rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout_rate,
+        )
+    else:
+        raise ValueError(
+            f"Target module {target_module} is not supported. "
+            f"Currently, only `torch.nn.Embedding`, `torch.nn.Conv2d` "
+            f"`torch.nn.Linear` and are supported."
+        )
+
+    return new_module
+

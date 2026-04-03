@@ -50,14 +50,14 @@ fi
 #     local/download_and_untar.sh ${CDSD}/CDSD-Interspeech.zip ${CDSD}
 # fi
 # CDSD="/root/shared-data/zhangxiaoqing-data/CDSD"
-#  执行数据准备
+#  执行
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     echo "Data preparation"
-    local/data_prep.sh ${CDSD}/CDSD-Interspeech/after_catting/1h data
+    local/data_prep.sh ${CDSD}/CDSD-Interspeech/after_catting/1h data      #partA
+    # local/data_prep.sh ${CDSD}/CDSD-Interspeech/after_catting/10h data     #partB
     ./utils/fix_data_dir.sh data/data_all
     local/create_subsets.sh data 
     
 fi
 
-#在脚本成功完成时记录一条日志消息，并显示脚本运行的总时间
 log "Successfully finished. [elapsed=${SECONDS}s]"  #SECONDS是一个特殊的变量，它会自动记录脚本运行以来的秒数

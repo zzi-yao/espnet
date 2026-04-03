@@ -35,6 +35,7 @@ from espnet2.main_funcs.collect_stats import collect_stats
 from espnet2.optimizers.optim_groups import configure_optimizer
 from espnet2.optimizers.loraplus import create_loraplus_optimizer
 from espnet2.optimizers.moelora import create_moelora_optimizer
+from espnet2.optimizers.vera_optimizer import create_vera_optimizer
 from espnet2.optimizers.sgd import SGD
 from espnet2.samplers.build_batch_sampler import (
     BATCH_TYPES,
@@ -717,7 +718,7 @@ class AbsTask(ABC):
             type=str,
             default="lora",
             help="Adapter Name",
-            choices=["lora", "houlsby","vera","melora","moelora","gora"],
+            choices=["lora", "houlsby","vera","melora","moelora","gora","adalora","dora","deegora","deelora"],
         )
         group.add_argument(
             "--save_strategy",
@@ -756,7 +757,7 @@ class AbsTask(ABC):
             "  # Load only decoder parameters"
             "  --init_param some/where/model.pth:decoder:decoder\n"
             "  # Load only decoder parameters excluding decoder.embed"
-            "  --init_param some/where/model.pth:decoder:decoder:decoder.embed\n"
+            "  --init_param some/where/model.pth:decoder:ecodedr:decoder.embed\n"
             "  --init_param some/where/model.pth:decoder:decoder:decoder.embed\n",
         )
         group.add_argument(
@@ -1193,7 +1194,7 @@ class AbsTask(ABC):
                 )
             else:
                 optim = optim_class(model.parameters(), **args.optim_conf)
-                # optim = create_moelora_optimizer(
+                # optim = create_vera_optimizer(
                 #     model=model,
                 #     optimizer_cls=optim_class,
                 #     **args.optim_conf
@@ -1629,6 +1630,33 @@ class AbsTask(ABC):
                         else "cpu"
                     ),
                 )
+            # # =================  7. 统一平均 lora_A1 + lora_A2 → lora_A  =================
+            # # 只在两份 ckpt 都传了才做
+            # if len(args.init_param) == 2:
+            #     avg_state = {}
+            #     with torch.no_grad():
+            #         for name, param in model.named_parameters():
+            #             if "lora_A1" in name:          # 找到 A1
+            #                 a1 = param
+            #                 a2_name = name.replace("lora_A1", "lora_A2")
+            #                 a2 = dict(model.named_parameters())[a2_name]
+            #                 avg = (a1.data + a2.data) * 0.5
+            #                 a_name = name.replace("lora_A1", "lora_A")
+            #                 dict(model.named_parameters())[a_name].data.copy_(avg)
+            #                 avg_state[a_name] = avg.clone()
+            #     logging.info(f"averaged lora_A for {len(avg_state)} layers")
+            #     avg_state1 = {}
+            #     with torch.no_grad():
+            #         for name, param in model.named_parameters():
+            #             if "lora_B1" in name:          # 找到 B1
+            #                 b1 = param
+            #                 b2_name = name.replace("lora_B1", "lora_B2")
+            #                 b2 = dict(model.named_parameters())[b2_name]
+            #                 avg1 = (b1.data + b2.data) * 0.5
+            #                 b_name = name.replace("lora_B1", "lora_B")
+            #                 dict(model.named_parameters())[b_name].data.copy_(avg1)
+            #                 avg_state1[b_name] = avg1.clone()
+            #     logging.info(f"averaged lora_B for {len(avg_state1)} layers")
 
             # 7. Build iterator factories
             if args.multiple_iterator:
