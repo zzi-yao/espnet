@@ -68,9 +68,9 @@ use_adapter: true
 adapter: deegora
 save_strategy: required_grad_only
 adapter_conf:
-    rank: 48  #8
-    alpha: 96    #16
+    rank: 64  #8
+    alpha: 128    #16
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
 
-init_param: ["exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilingual30rank11/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilingual48rank22/valid.acc.ave.pth"]
+init_param: ["exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilingual32rank11/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilingual48rank22/valid.acc.ave.pth"]

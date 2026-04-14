@@ -12,12 +12,12 @@ valid_set="valid"
 # test_sets="test"
 test_sets="test valid"
 
-asr_config=conf/tuning/train_asr_whisper_small_deelora.yaml
+asr_config=conf/tuning/train_asr_whisper_small_deegora.yaml
 inference_config=conf/whisper_decode_asr.yaml
 
 ./asr.sh \
     --stage 11 \
-    --stop_stage 11 \
+    --stop_stage 13 \
     --skip_data_prep false \
     --skip_train false \
     --skip_eval false \

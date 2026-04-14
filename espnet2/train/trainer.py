@@ -258,10 +258,10 @@ class Trainer:
         #         from loralib.layers import GoRALinear, allocate_ranks_by_importance 
         #         from loralib.utils import mark_only_gora_as_trainable 
         #         gora_cfg = {
-        #             "total_param_budget": getattr(trainer_options, "gora_total_param_budget", 19464192),#6488064
+        #             "total_param_budget": getattr(trainer_options, "gora_total_param_budget", 12946128),#6488064
         #             "grad_steps": getattr(trainer_options, "gora_grad_steps", 4),
-        #             "min_rank": getattr(trainer_options, "gora_min_rank", 36),
-        #             "max_rank": getattr(trainer_options, "gora_max_rank", 64),
+        #             "min_rank": getattr(trainer_options, "gora_min_rank", 20),
+        #             "max_rank": getattr(trainer_options, "gora_max_rank", 48),
         #             "importance_type": getattr(trainer_options, "gora_importance_type", "union_mean"),
         #             "stable_gamma": getattr(trainer_options, "gora_stable_gamma", 16.),
         #         }

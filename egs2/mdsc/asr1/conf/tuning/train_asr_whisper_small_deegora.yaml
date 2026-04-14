@@ -37,7 +37,7 @@ batch_type: folded
 batch_size: 10 #10
 accum_grad: 1
 max_epoch: 7
-patience: 3  #none
+#patience: 3  #none
 init: none
 best_model_criterion:
 -   - valid
@@ -65,7 +65,7 @@ scheduler_conf:
 
 # LoRA finetune related
 use_adapter: true
-adapter: moelora
+adapter: deegora
 save_strategy: required_grad_only
 adapter_conf:
     rank: 48  #8
@@ -73,4 +73,4 @@ adapter_conf:
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
 
-# init_param: ["exp/exp2/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual64rank1/valid.acc.ave.pth","exp/exp2/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual64rank2/valid.acc.ave.pth"]
+init_param: ["exp/asr_train_asr_whisper_small_blora_raw_zh_whisper_multilingual32rank11/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_blora_raw_zh_whisper_multilingual48rank22/valid.acc.ave.pth"]
