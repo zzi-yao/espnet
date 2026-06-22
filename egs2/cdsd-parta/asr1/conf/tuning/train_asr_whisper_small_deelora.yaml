@@ -1,0 +1,77 @@
+normalize: null
+
+encoder: whisper
+encoder_conf:
+    whisper_model: small
+    dropout_rate: 0.0
+    # do_pad_trim: true         # should be set when doing zero-shot inference
+
+decoder: whisper
+decoder_conf:
+    whisper_model: small
+    dropout_rate: 0.0
+
+preprocessor: default
+preprocessor_conf:
+    whisper_language: "zh"
+    whisper_task: "transcribe"
+
+model_conf:
+    ctc_weight: 0.0
+    lsm_weight: 0.1
+    length_normalized_loss: false
+    extract_feats_in_collect_stats: false
+    sym_sos: "<|startoftranscript|>"
+    sym_eos: "<|endoftext|>"
+
+frontend: null
+input_size: 1                   # to prevent build_model() from complaining
+
+seed: 2022
+log_interval: 100
+num_att_plot: 0
+num_workers: 4
+sort_in_batch: descending       # how to sort data in making batch
+sort_batch: descending          # how to sort created batches
+batch_type: folded
+batch_size: 10 #10
+accum_grad: 1
+max_epoch: 7
+patience: 3  #none
+init: none
+best_model_criterion:
+-   - valid
+    - acc
+    - max
+keep_nbest_models: 3
+
+use_amp: true
+cudnn_deterministic: false
+cudnn_benchmark: false
+
+optim: adamw
+grad_clip: 1.0
+optim_conf:
+    lr: 5.0e-4
+    weight_decay: 0.01
+    betas:
+    - 0.9
+    - 0.99
+    eps: 1.0e-06
+scheduler: warmuplr
+scheduler_conf:
+    warmup_steps: 1500
+
+
+# LoRA finetune related
+use_adapter: true
+adapter: deelora
+save_strategy: required_grad_only
+adapter_conf:
+    rank: 32  #8
+    alpha: 64    #16
+    dropout_rate: 0.05
+    target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
+
+#init_param: ["exp/asr_train_asr_whisper_small_lora_raw_zh_whisper_multilingual96rank1/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_lora_raw_zh_whisper_multilingual96rank2/valid.acc.ave.pth"]
+init_param: ["exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilinguale31/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilinguale32/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_deelora_raw_zh_whisper_multilinguale33/valid.acc.ave.pth"]
