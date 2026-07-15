@@ -17,7 +17,7 @@ preprocessor_conf:
     whisper_task: "transcribe"
 
 model_conf:
-    ctc_weight: 0.0
+    ctc_weight: 0.0     #0.0
     lsm_weight: 0.1
     length_normalized_loss: false
     extract_feats_in_collect_stats: false
@@ -25,7 +25,7 @@ model_conf:
     sym_eos: "<|endoftext|>"
 
 frontend: null
-input_size: 1                  # to prevent build_model() from complaining
+input_size: 1                   # to prevent build_model() from complaining
 
 seed: 2022
 log_interval: 100
@@ -33,11 +33,11 @@ num_att_plot: 0
 num_workers: 4
 sort_in_batch: descending       # how to sort data in making batch
 sort_batch: descending          # how to sort created batches
-batch_type: folded
+batch_type: folded      #numel
 batch_size: 10
-accum_grad: 1
-max_epoch: 7
-patience: none
+accum_grad: 4
+max_epoch: 7  
+# patience: 3
 init: none
 best_model_criterion:
 -   - valid
@@ -61,15 +61,3 @@ optim_conf:
 scheduler: warmuplr
 scheduler_conf:
     warmup_steps: 1500
-
-
-# LoRA finetune related
-use_adapter: true
-adapter: lora
-save_strategy: required_grad_only
-adapter_conf:
-    rank: 8  #8
-    alpha: 16    #16
-    dropout_rate: 0.05
-    target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
-#,"mlp.0", "mlp.2"

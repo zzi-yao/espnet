@@ -15,7 +15,7 @@ preprocessor: default
 preprocessor_conf:
     whisper_language: "zh"
     whisper_task: "transcribe"
-
+    
 model_conf:
     ctc_weight: 0.0
     lsm_weight: 0.1
@@ -52,7 +52,7 @@ cudnn_benchmark: false
 optim: adamw
 grad_clip: 1.0
 optim_conf:
-    lr: 5.0e-04
+    lr: 7.5e-4 #5.0e-04                 # 保持 5e-4 很好！旁路微调通常需要比全量微调大 10~50 倍的学习率
     weight_decay: 0.01
     betas:
     - 0.9
@@ -62,14 +62,8 @@ scheduler: warmuplr
 scheduler_conf:
     warmup_steps: 1500
 
-
-# LoRA finetune related
-use_adapter: true
-adapter: lora
-save_strategy: required_grad_only
-adapter_conf:
-    rank: 8  #8
-    alpha: 16    #16
-    dropout_rate: 0.05
-    target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
-#,"mlp.0", "mlp.2"
+# ========================================================
+# 🚀 修改后的因式分解双路旁路（Factorized Side-Branch）配置
+# ========================================================
+use_adapter: false              # 必须设为 false！关闭 ESPnet 原厂的 LoRA 挂载逻辑，改用我们手写的注入
+save_strategy: required_grad_only # 保持不变，极其关键！告诉 ESPnet 只保存 requires_grad=True 的参数（即只存旁路矩阵，不存Whisper主干）

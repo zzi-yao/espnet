@@ -4,16 +4,15 @@
 #set -e
 #--inference_asr_model "3epoch.pth" \
 #    --gpu_inference true \
-#--max_wav_duration 30 \
 set -u
 set -o pipefail
-export HF_ENDPOINT="https://hf-mirror.com"
+
 train_set="train"
 valid_set="valid"
-test_sets="test"
-# test_sets="test valid"
+# test_sets="test"
+test_sets="test valid"
 
-asr_config=conf/tuning/train_asr_whisper_small_lora.yaml
+asr_config=conf/tuning/train_asr_whisper_small_deegora.yaml
 inference_config=conf/whisper_decode_asr.yaml
 
 ./asr.sh \
@@ -30,7 +29,7 @@ inference_config=conf/whisper_decode_asr.yaml
     --gpu_inference true \
     --nbpe 5000 \
     --feats_normalize "" \
-    --max_wav_duration 15 \
+    --max_wav_duration 30 \
     --audio_format "flac.ark" \
     --feats_type raw \
     --use_lm false \
@@ -41,4 +40,3 @@ inference_config=conf/whisper_decode_asr.yaml
     --test_sets "${test_sets}" \
     --lm_train_text "data/${train_set}/text" \
     --bpe_train_text "data/${train_set}/text" "$@" 
-

@@ -25,7 +25,7 @@ model_conf:
     sym_eos: "<|endoftext|>"
 
 frontend: null
-input_size: 1                  # to prevent build_model() from complaining
+input_size: 1                   # to prevent build_model() from complaining
 
 seed: 2022
 log_interval: 100
@@ -34,10 +34,10 @@ num_workers: 4
 sort_in_batch: descending       # how to sort data in making batch
 sort_batch: descending          # how to sort created batches
 batch_type: folded
-batch_size: 10
+batch_size: 10 #10
 accum_grad: 1
 max_epoch: 7
-patience: none
+patience: 3  #none
 init: none
 best_model_criterion:
 -   - valid
@@ -52,7 +52,7 @@ cudnn_benchmark: false
 optim: adamw
 grad_clip: 1.0
 optim_conf:
-    lr: 5.0e-04
+    lr: 5.0e-4
     weight_decay: 0.01
     betas:
     - 0.9
@@ -65,11 +65,12 @@ scheduler_conf:
 
 # LoRA finetune related
 use_adapter: true
-adapter: lora
+adapter: deelora
 save_strategy: required_grad_only
 adapter_conf:
-    rank: 8  #8
-    alpha: 16    #16
+    rank: 96  #83
+    alpha: 192    #16
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
-#,"mlp.0", "mlp.2"
+
+# init_param: ["exp/exp2/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual64rank1/valid.acc.ave.pth","exp/exp2/asr_train_asr_whisper_small_moelora_raw_zh_whisper_multilingual64rank2/valid.acc.ave.pth"]

@@ -2,6 +2,7 @@
 # "downloads" means the corpus can be downloaded by the recipe automatically
 CDSD=/home/q/Downloads/CDSD
 MDSC=/home/q/Downloads/MDSC
+MSDM=/home/q/Downloads/MSDM
 ACCENTED_FR=downloads
 ACCENT_DB=
 ACESINGER=downloads

@@ -25,7 +25,7 @@ model_conf:
     sym_eos: "<|endoftext|>"
 
 frontend: null
-input_size: 1                  # to prevent build_model() from complaining
+input_size: 1                   # to prevent build_model() from complaining
 
 seed: 2022
 log_interval: 100
@@ -34,7 +34,7 @@ num_workers: 4
 sort_in_batch: descending       # how to sort data in making batch
 sort_batch: descending          # how to sort created batches
 batch_type: folded
-batch_size: 10
+batch_size: 12
 accum_grad: 1
 max_epoch: 7
 patience: none
@@ -65,11 +65,20 @@ scheduler_conf:
 
 # LoRA finetune related
 use_adapter: true
-adapter: lora
+adapter: gora
 save_strategy: required_grad_only
 adapter_conf:
-    rank: 8  #8
-    alpha: 16    #16
+    rank: 48  #8
+    alpha: 96    #16
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
-#,"mlp.0", "mlp.2"
+
+# ========== GoRA 新增配置 ==========
+gora_total_param_budget: 6488064  # 你的模型总可训练参数量（6.49M）
+gora_grad_steps: 4           # 梯度累积步数
+gora_min_rank: 4             # 每层最小秩
+gora_max_rank: 32            # 每层最大秩
+gora_importance_type: "union_mean"  # 重要性计算方式
+gora_stable_gamma: 1.0      # 初始化稳定系数
+gora_init_method: "grad_compress"   # GoRA初始化方式
+gora_rank_stablize: true     # 秩稳定化

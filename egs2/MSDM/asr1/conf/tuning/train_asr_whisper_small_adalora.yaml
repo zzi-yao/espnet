@@ -25,7 +25,7 @@ model_conf:
     sym_eos: "<|endoftext|>"
 
 frontend: null
-input_size: 1                  # to prevent build_model() from complaining
+input_size: 1                   # to prevent build_model() from complaining
 
 seed: 2022
 log_interval: 100
@@ -65,11 +65,10 @@ scheduler_conf:
 
 # LoRA finetune related
 use_adapter: true
-adapter: lora
+adapter: adalora
 save_strategy: required_grad_only
 adapter_conf:
-    rank: 8  #8
-    alpha: 16    #16
+    rank: 48  #8
+    alpha: 96    #16
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
-#,"mlp.0", "mlp.2"

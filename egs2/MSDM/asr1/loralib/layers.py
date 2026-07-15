@@ -2,16 +2,15 @@
 #  Copyright (c) Microsoft Corporation. All rights reserved.
 #  Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 #  ------------------------------------------------------------------------------------------
-import torch
+import torch 
 import json
-import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn as nn 
+import torch.nn.functional as F 
 
 import math
 from typing import Optional, List
 
 import os
-import logging
 
 ##
 class LoRALayer():
@@ -615,7 +614,7 @@ class DEELoRALinear(nn.Linear, LoRALayer):
         **kwargs
     ):
         # ====================== 新增：读取预分配秩文件 ======================
-        rank_file_path = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual32rank/gora_rank_allocation.json"  #32rank分秩
+        rank_file_path = "/home/q/espnet/egs2/cdsdsb/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual96rank/gora_rank_allocation.json"  #32rank分秩
         # gradG_path = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual48rankg/all_gradG.pt"
         matched_r = r
         # grad_G = None  #添加
@@ -645,17 +644,15 @@ class DEELoRALinear(nn.Linear, LoRALayer):
         self.fan_in_fan_out = fan_in_fan_out 
         # if r > 0:
         if matched_r > 0:
-            self.lora_A1 = nn.Parameter(self.weight.new_zeros((matched_r, in_features)))
-            self.lora_B1 = nn.Parameter(self.weight.new_zeros((out_features, matched_r)))
-            self.lora_A2 = nn.Parameter(self.weight.new_zeros((matched_r, in_features)))
-            self.lora_B2 = nn.Parameter(self.weight.new_zeros((out_features, matched_r)))
+            # self.lora_A1 = nn.Parameter(self.weight.new_zeros((r, in_features)))
+            # self.lora_B1 = nn.Parameter(self.weight.new_zeros((out_features, r)))
+            # self.lora_A2 = nn.Parameter(self.weight.new_zeros((r, in_features)))
+            # self.lora_B2 = nn.Parameter(self.weight.new_zeros((out_features, r)))
             # self.lora_expert = nn.Parameter(torch.zeros(2))
             # self.lora_gate = nn.Linear(in_features, 2, bias=False)
-            self.lora_A3 = nn.Parameter(self.weight.new_zeros((matched_r, in_features)))
-            self.lora_B3 = nn.Parameter(self.weight.new_zeros((out_features, matched_r)))
-            self.lora_expert = nn.Parameter(torch.zeros(3))
-            # self.lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)))
-            # self.lora_B = nn.Parameter(self.weight.new_zeros((out_features, r)), requires_grad=False)
+            self.lora_A2 = nn.Parameter(self.weight.new_zeros((matched_r, in_features)))
+            self.lora_B2 = nn.Parameter(self.weight.new_zeros((out_features,matched_r)))
+            # self.lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)), requires_grad=False)
             # self.scaling = 2
             # self.scaling = self.lora_alpha / self.r
             self.scaling = self.lora_alpha / matched_r
@@ -668,9 +665,9 @@ class DEELoRALinear(nn.Linear, LoRALayer):
         nn.Linear.reset_parameters(self)
         # if hasattr(self, 'lora_gate'):
         #     nn.init.normal_(self.lora_gate.weight, std=0.01)
-        # if hasattr(self, 'lora_A1'):
-        #     nn.init.kaiming_uniform_(self.lora_A1, a=math.sqrt(5))
-        #     nn.init.zeros_(self.lora_B1)
+        if hasattr(self, 'lora_A2'):
+            nn.init.kaiming_uniform_(self.lora_A2, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B2)
         # if hasattr(self, 'lora_A'):
         #     nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
         #     nn.init.zeros_(self.lora_B)
@@ -709,21 +706,19 @@ class DEELoRALinear(nn.Linear, LoRALayer):
             if self.merge_weights and self.merged:
                 # Make sure that the weights are not merged
                 if self.r > 0:
-                    s = torch.softmax(self.lora_expert, dim=0)  # [w1, w2]
+                    # s = torch.softmax(self.lora_expert, dim=0)  # [w1, w2]
                     # self.weight.data -= T((s[0] * (self.lora_B1 @ self.lora_A1)) + (s[1] * (self.lora_B2 @ self.lora_A2))) * self.scaling
-                    # self.weight.data -= T(self.lora_B1 @ self.lora_A1) * self.scaling
-                    delta_w = (s[0] * (self.lora_B1 @ self.lora_A1) +s[1] * (self.lora_B2 @ self.lora_A2) +s[2] * (self.lora_B3 @ self.lora_A3))
-                    self.weight.data -= T(delta_w) * self.scaling
+                    self.weight.data -= T(self.lora_B2 @ self.lora_A2) * self.scaling
+                    # self.weight.data -= T(self.lora_B2 @ self.lora_A2) * self.scaling
                 self.merged = False
         else:
             if self.merge_weights and not self.merged:
                 # Merge the weights and mark it
                 if self.r > 0:
-                    s = torch.softmax(self.lora_expert, dim=0)  # [w1, w2]
+                    # s = torch.softmax(self.lora_expert, dim=0)  # [w1, w2]
                     # self.weight.data += T((s[0] * (self.lora_B1 @ self.lora_A1)) + (s[1] * (self.lora_B2 @ self.lora_A2))) * self.scaling#方法二的公式1
-                    # self.weight.data += T(self.lora_B1 @ self.lora_A1) * self.scaling
-                    delta_w = (s[0] * (self.lora_B1 @ self.lora_A1) +s[1] * (self.lora_B2 @ self.lora_A2) +s[2] * (self.lora_B3 @ self.lora_A3))
-                    self.weight.data += T(delta_w) * self.scaling
+                    self.weight.data += T(self.lora_B2 @ self.lora_A2) * self.scaling
+                    # self.weight.data += T(self.lora_B2 @ self.lora_A2) * self.scaling
                 self.merged = True  
 
     def forward(self, x: torch.Tensor):
@@ -745,11 +740,10 @@ class DEELoRALinear(nn.Linear, LoRALayer):
 
         if self.r > 0 and not self.merged:
             result = F.linear(x, T(self.weight), bias=self.bias)  
-            s = torch.softmax(self.lora_expert, dim=0)  # [w1, w2]
+            # s = torch.softmax(self.lora_expert, dim=0)  # [w1, w2]
             # delta = (s[0] * (self.lora_A1.transpose(0, 1) @ self.lora_B1.transpose(0, 1))) + (s[1] * (self.lora_A2.transpose(0, 1) @ self.lora_B2.transpose(0, 1))) 
-            delta = (s[0] * (self.lora_A1.transpose(0, 1) @ self.lora_B1.transpose(0, 1))) + (s[1] * (self.lora_A2.transpose(0, 1) @ self.lora_B2.transpose(0, 1))) + (s[2] * (self.lora_A3.transpose(0, 1) @ self.lora_B3.transpose(0, 1)))
-            result += (self.lora_dropout(x) @ delta) * self.scaling
-            # result += (self.lora_dropout(x) @ self.lora_A1.transpose(0, 1) @ self.lora_B1.transpose(0, 1)) * self.scaling
+            # result += (self.lora_dropout(x) @ delta) * self.scaling
+            result += (self.lora_dropout(x) @ self.lora_A2.transpose(0, 1) @ self.lora_B2.transpose(0, 1)) * self.scaling
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
@@ -767,8 +761,8 @@ class DEEGoRALinear(nn.Linear, LoRALayer):
         **kwargs
     ):
         # ====================== 新增：读取预分配秩文件 ======================
-        rank_file_path1 = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual48rank/gora_rank_allocation.json"  #32rank分秩
-        rank_file_path2 = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual48rank/gora_rank_allocation.json"
+        rank_file_path1 = "/home/q/espnet/egs2/MSDM/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual32rankb/gora_rank_allocation.json"  #32rank分秩
+        rank_file_path2 = "/home/q/espnet/egs2/MSDM/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual48rankb/gora_rank_allocation.json"
         matched_r1 = r
         matched_r2 = r
         if os.path.exists(rank_file_path1):
@@ -967,8 +961,7 @@ def allocate_ranks_by_importance(
     importance_type: str = 'union_mean',
     min_rank: int = 1,
     max_rank: int = 64,
-    param_tolerance: float = 0.05,  # 新增：参数量浮动容忍度（5%）0.05
-    output_dir: str = None,
+    param_tolerance: float = 0.05  # 新增：参数量浮动容忍度（5%）0.05
 ) -> dict:
     # 1. 收集层信息（重要性+维度系数）
     layer_info = {}
@@ -987,12 +980,10 @@ def allocate_ranks_by_importance(
     
     # 2. 按加权重要性分配秩（先不微调）
     named_ranks = {}
-    pre_clip_ranks = {}
     current_total_params = 0
     for name, info in layer_info.items():
         layer_param_budget = (info["weighted_imp"] / total_weighted_importance) * total_param_budget
         rank = round(layer_param_budget / info["dim_coeff"])
-        pre_clip_ranks[name] = rank
         rank = max(min(rank, max_rank), min_rank)
         named_ranks[name] = rank
         current_total_params += rank * info["dim_coeff"]
@@ -1049,21 +1040,7 @@ def allocate_ranks_by_importance(
     # 可选：打印偏差信息（调试用）
     final_diff_ratio = abs(total_param_budget - current_total_params) / total_param_budget
     print(f"参数量偏差比例：{final_diff_ratio:.2%}（容忍度：{param_tolerance:.2%})")
-    if output_dir is not None:
-        import json
-        import os
-        comparison_data = {}
-        for name in named_ranks.keys():
-            comparison_data[name] = {
-                "pre_clipping_rank": pre_clip_ranks.get(name, named_ranks[name]),
-                "post_clipping_rank": named_ranks[name]
-            }
-        
-        os.makedirs(output_dir, exist_ok=True)
-        save_path = os.path.join(output_dir, "gora_rank_comparison.json")
-        with open(save_path, "w") as f:
-            json.dump(comparison_data, f, indent=4)
-        print(f"📊 [审稿人数据导出成功] 原始与裁剪后对比已保存至: {save_path}")
+    
     return named_ranks
 class AdaLoRALinear(nn.Linear, LoRALayer):
     def __init__(

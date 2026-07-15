@@ -9,7 +9,6 @@ if [ -d ${data} ];then
     cat $data/data_all/wav.scp > $data/all.scp
     awk 'NR % 10 == 0' $data/all.scp > $data/test.scp
     ./utils/filter_scp.pl --exclude $data/test.scp $data/all.scp > $data/remaining.scp
-    # awk 'NR % 10 == 0' $data/remaining.scp > $data/valid.scp
     awk 'NR % 10 == 0' $data/remaining.scp > $data/valid.scp
     ./utils/filter_scp.pl --exclude $data/valid.scp $data/remaining.scp > $data/train.scp
     ./utils/subset_data_dir.sh --utt-list $data/train.scp $data/data_all $data/train
@@ -28,28 +27,28 @@ if [ -d ${data} ];then
 #     ./utils/filter_scp.pl --exclude $data/train1.utt $data/train/utt2spk | awk '{print $1}' > $data/train2.utt
 #     ./utils/subset_data_dir.sh --utt-list $data/train2.utt $data/train $data/train2
 #     echo "Data split into train, valid, and test sets successfully."
-# else
-#     echo "Error: Directory $data does not exist."
-#     exit 1
-# fi
-    awk 'BEGIN{
-        split("13 04 14 42 05 12 15 20 22 07 23 29 34 43 09", E1);  # train1: 简单
-        split("38 25 26 10 02 01 08 40 33 37 39 11 41 03 16", E2);  # train2: 中等
-        for(i in E1) easy[E1[i]]=1
-        for(i in E2) medium[E2[i]]=1
-    }
-    {
-        spk=$2;
-        if(spk in easy) print $1 > "'$data/train1.utt'";
-        else if(spk in medium) print $1 > "'$data/train2.utt'";
-        else print $1 > "'$data/train3.utt'"
-    }' $data/train/utt2spk
-
-    ./utils/subset_data_dir.sh --utt-list $data/train1.utt $data/train $data/train1
-    ./utils/subset_data_dir.sh --utt-list $data/train2.utt $data/train $data/train2
-    ./utils/subset_data_dir.sh --utt-list $data/train3.utt $data/train $data/train3
-    echo "Data split into train1, train2, and train3 sets successfully."
 else
     echo "Error: Directory $data does not exist."
     exit 1
 fi
+#     awk 'BEGIN{
+#         split("13 04 14 42 05 12 15 20 22 07 23 29 34 43 09", E1);  # train1: 简单
+#         split("38 25 26 10 02 01 08 40 33 37 39 11 41 03 16", E2);  # train2: 中等
+#         for(i in E1) easy[E1[i]]=1
+#         for(i in E2) medium[E2[i]]=1
+#     }
+#     {
+#         spk=$2;
+#         if(spk in easy) print $1 > "'$data/train1.utt'";
+#         else if(spk in medium) print $1 > "'$data/train2.utt'";
+#         else print $1 > "'$data/train3.utt'"
+#     }' $data/train/utt2spk
+
+#     ./utils/subset_data_dir.sh --utt-list $data/train1.utt $data/train $data/train1
+#     ./utils/subset_data_dir.sh --utt-list $data/train2.utt $data/train $data/train2
+#     ./utils/subset_data_dir.sh --utt-list $data/train3.utt $data/train $data/train3
+#     echo "Data split into train1, train2, and train3 sets successfully."
+# else
+#     echo "Error: Directory $data does not exist."
+#     exit 1
+# fi
