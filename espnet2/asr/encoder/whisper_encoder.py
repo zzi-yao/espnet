@@ -148,6 +148,19 @@ class OpenAIWhisperEncoder(AbsEncoder):
                 x = self.dropout(x)
 
         x = self.encoders.ln_post(x)
+        
+        # 6. 🌟 完美的Late Fusion：在进入 Decoder 之前的最后关头，给它来一记 HuBERT 强心针
+        if hasattr(self, 'post_fusion') and H_prime is not None:
+            x = self.post_fusion(x, H_prime)
+        #==============================================================================添加替换结束
+
+        # for layer, block in enumerate(self.encoders.blocks):
+        #     x = block(x)
+        #     if layer < len(self.encoders.blocks) - 1:
+        #         x = self.dropout(x)
+
+        # x = self.encoders.ln_post(x)
+
 
         if ilens is not None:
             olens = (
