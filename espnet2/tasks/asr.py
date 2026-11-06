@@ -1,6 +1,7 @@
 import argparse
 import logging
 from typing import Callable, Collection, Dict, List, Optional, Tuple
+from typing import Union
 
 import numpy as np
 import torch
@@ -92,6 +93,7 @@ from espnet2.train.trainer import Trainer
 from espnet2.utils.get_default_kwargs import get_default_kwargs
 from espnet2.utils.nested_dict_action import NestedDictAction
 from espnet2.utils.types import float_or_none, int_or_none, str2bool, str_or_none
+from espnet2.asr.proxy_espnet_model import ProxyESPnetASRModel
 
 frontend_choices = ClassChoices(
     name="frontend",
@@ -131,6 +133,7 @@ model_choices = ClassChoices(
     "model",
     classes=dict(
         espnet=ESPnetASRModel,
+        proxy_espnet=ProxyESPnetASRModel,
         maskctc=MaskCTCModel,
         pit_espnet=PITESPnetModel,
     ),
@@ -172,6 +175,31 @@ encoder_choices = ClassChoices(
     type_check=AbsEncoder,
     default="rnn",
 )
+proxy_encoder_choices = ClassChoices(
+    "proxy_encoder",
+    classes=dict(
+        conformer=ConformerEncoder,
+        transformer=TransformerEncoder,
+        transformer_multispkr=TransformerEncoderMultiSpkr,
+        contextual_block_transformer=ContextualBlockTransformerEncoder,
+        contextual_block_conformer=ContextualBlockConformerEncoder,
+        vgg_rnn=VGGRNNEncoder,
+        rnn=RNNEncoder,
+        wav2vec2=FairSeqWav2Vec2Encoder,
+        hubert=FairseqHubertEncoder,
+        hubert_pretrain=FairseqHubertPretrainEncoder,
+        torchaudiohubert=TorchAudioHuBERTPretrainEncoder,
+        longformer=LongformerEncoder,
+        branchformer=BranchformerEncoder,
+        whisper=OpenAIWhisperEncoder,
+        e_branchformer=EBranchformerEncoder,
+        avhubert=FairseqAVHubertEncoder,
+        multiconv_conformer=MultiConvConformerEncoder,
+        beats=BeatsEncoder,
+    ),
+    type_check=AbsEncoder,
+    default=None,
+)
 postencoder_choices = ClassChoices(
     name="postencoder",
     classes=dict(
@@ -184,6 +212,28 @@ postencoder_choices = ClassChoices(
 )
 decoder_choices = ClassChoices(
     "decoder",
+    classes=dict(
+        transformer=TransformerDecoder,
+        lightweight_conv=LightweightConvolutionTransformerDecoder,
+        lightweight_conv2d=LightweightConvolution2DTransformerDecoder,
+        dynamic_conv=DynamicConvolutionTransformerDecoder,
+        dynamic_conv2d=DynamicConvolution2DTransformerDecoder,
+        rnn=RNNDecoder,
+        transducer=TransducerDecoder,
+        mlm=MLMDecoder,
+        whisper=OpenAIWhisperDecoder,
+        hugging_face_transformers=HuggingFaceTransformersDecoder,
+        s4=S4Decoder,
+        linear_decoder=LinearDecoder,
+        # This decoder is only meant for classification tasks.
+        # TODO(shikhar): Move classification to cls1 task completely.
+    ),
+    type_check=AbsDecoder,
+    default=None,
+    optional=True,
+)
+proxy_decoder_choices = ClassChoices(
+    "proxy_decoder",
     classes=dict(
         transformer=TransformerDecoder,
         lightweight_conv=LightweightConvolutionTransformerDecoder,
@@ -233,10 +283,14 @@ class ASRTask(AbsTask):
         preencoder_choices,
         # --encoder and --encoder_conf
         encoder_choices,
+        # --proxy_encoder and --proxy_encoder_conf
+        proxy_encoder_choices,
         # --postencoder and --postencoder_conf
         postencoder_choices,
         # --decoder and --decoder_conf
         decoder_choices,
+        # --proxy_decoder and --proxy_decoder_conf
+        proxy_decoder_choices,
         # --preprocessor and --preprocessor_conf
         preprocessor_choices,
     ]
@@ -510,7 +564,8 @@ class ASRTask(AbsTask):
 
     @classmethod
     @typechecked
-    def build_model(cls, args: argparse.Namespace) -> ESPnetASRModel:
+    # def build_model(cls, args: argparse.Namespace) -> ESPnetASRModel:
+    def build_model(cls, args: argparse.Namespace) -> Union[ESPnetASRModel, ProxyESPnetASRModel]:
         if isinstance(args.token_list, str):
             with open(args.token_list, encoding="utf-8") as f:
                 token_list = [line.rstrip() for line in f]
@@ -575,6 +630,15 @@ class ASRTask(AbsTask):
         if getattr(args, "encoder", None) is not None:
             encoder_class = encoder_choices.get_class(args.encoder)
             encoder = encoder_class(input_size=input_size, **args.encoder_conf)
+            # proxy encoder
+            # --- 修复后：先给默认值 None，杜绝未定义报错 ---
+            proxy_encoder_class = None
+            if hasattr(args, "proxy_encoder") and args.proxy_encoder is not None:
+                proxy_encoder_class = proxy_encoder_choices.get_class(args.proxy_encoder)
+            if proxy_encoder_class:
+                proxy_encoder = proxy_encoder_class(input_size=input_size, **args.proxy_encoder_conf)
+            else:
+                proxy_encoder=None
             encoder_output_size = encoder.output_size()
         else:
             encoder = None
@@ -591,9 +655,42 @@ class ASRTask(AbsTask):
         else:
             postencoder = None
 
-        # 5. Decoder
+        # # 5. Decoder
+        # if getattr(args, "decoder", None) is not None:
+        #     decoder_class = decoder_choices.get_class(args.decoder)
+
+        #     if args.decoder == "transducer":
+        #         decoder = decoder_class(
+        #             vocab_size,
+        #             embed_pad=0,
+        #             **args.decoder_conf,
+        #         )
+
+        #         joint_network = JointNetwork(
+        #             vocab_size,
+        #             encoder.output_size(),
+        #             decoder.dunits,
+        #             **args.joint_net_conf,
+        #         )
+        #     else:
+        #         decoder = decoder_class(
+        #             vocab_size=vocab_size,
+        #             encoder_output_size=encoder_output_size,
+        #             **args.decoder_conf,
+        #         )
+        #         joint_network = None
+        # else:
+        #     decoder = None
+        #     joint_network = None
+        # 5. Decoder and proxy decoder
         if getattr(args, "decoder", None) is not None:
             decoder_class = decoder_choices.get_class(args.decoder)
+            # proxy_decoder_class = proxy_decoder_choices.get_class(args.proxy_decoder)
+            # --- 修复开始：先赋默认值 None，再做属性存在性检查 ---
+            proxy_decoder_class = None
+            if hasattr(args, "proxy_decoder") and args.proxy_decoder is not None:
+                proxy_decoder_class = proxy_decoder_choices.get_class(args.proxy_decoder)
+            # --- 修复结束 ---
 
             if args.decoder == "transducer":
                 decoder = decoder_class(
@@ -609,11 +706,21 @@ class ASRTask(AbsTask):
                     **args.joint_net_conf,
                 )
             else:
+                # decoder
                 decoder = decoder_class(
                     vocab_size=vocab_size,
                     encoder_output_size=encoder_output_size,
                     **args.decoder_conf,
                 )
+                # proxy decoder
+                if proxy_decoder_class:
+                    proxy_decoder = proxy_decoder_class(
+                        vocab_size=vocab_size,
+                        encoder_output_size=encoder_output_size,
+                        **args.proxy_decoder_conf,
+                    )
+                else:
+                    proxy_decoder=None
                 joint_network = None
         else:
             decoder = None
@@ -629,20 +736,52 @@ class ASRTask(AbsTask):
             model_class = model_choices.get_class(args.model)
         except AttributeError:
             model_class = model_choices.get_class("espnet")
-        model = model_class(
-            vocab_size=vocab_size,
-            frontend=frontend,
-            specaug=specaug,
-            normalize=normalize,
-            preencoder=preencoder,
-            encoder=encoder,
-            postencoder=postencoder,
-            decoder=decoder,
-            ctc=ctc,
-            joint_network=joint_network,
-            token_list=token_list,
-            **args.model_conf,
-        )
+        # model = model_class(
+        #     vocab_size=vocab_size,
+        #     frontend=frontend,
+        #     specaug=specaug,
+        #     normalize=normalize,
+        #     preencoder=preencoder,
+        #     encoder=encoder,
+        #     postencoder=postencoder,
+        #     decoder=decoder,
+        #     ctc=ctc,
+        #     joint_network=joint_network,
+        #     token_list=token_list,
+        #     **args.model_conf,
+        # )
+        if getattr(args, "model", None)=="proxy_espnet":
+            model = model_class(
+                vocab_size=vocab_size,
+                frontend=frontend,
+                specaug=specaug,
+                normalize=normalize,
+                preencoder=preencoder,
+                encoder=encoder,
+                proxy_encoder=proxy_encoder,
+                postencoder=postencoder,
+                decoder=decoder,
+                proxy_decoder=proxy_decoder,
+                ctc=ctc,
+                joint_network=joint_network,
+                token_list=token_list,
+                **args.model_conf,
+            )
+        else:
+            model = model_class(
+                vocab_size=vocab_size,
+                frontend=frontend,
+                specaug=specaug,
+                normalize=normalize,
+                preencoder=preencoder,
+                encoder=encoder,
+                postencoder=postencoder,
+                decoder=decoder,
+                ctc=ctc,
+                joint_network=joint_network,
+                token_list=token_list,
+                **args.model_conf,
+            )
 
         # FIXME(kamo): Should be done in model?
         # 8. Initialize

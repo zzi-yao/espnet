@@ -34,7 +34,7 @@ num_workers: 4
 sort_in_batch: descending       # how to sort data in making batch
 sort_batch: descending          # how to sort created batches
 batch_type: folded
-batch_size: 10 #10
+batch_size: 8 #10
 accum_grad: 1
 max_epoch: 7
 #patience: 3  #none
@@ -73,4 +73,4 @@ adapter_conf:
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
 
-init_param: ["exp/asr_train_asr_whisper_small_blora_raw_zh_whisper_multilingual32rank11/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_blora_raw_zh_whisper_multilingual48rank22/valid.acc.ave.pth"]
+init_param: ["exp/asr_train_asr_whisper_small_a1lora_raw_zh_whisper_multilingual32rank11/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_a1lora_raw_zh_whisper_multilingual48rank22/valid.acc.ave.pth"]

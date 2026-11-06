@@ -1,0 +1,60 @@
+model: dual_whisper
+frontend: null
+input_size: 1
+normalize: null
+encoder: dual_whisper
+encoder_conf: {}
+decoder: dual_whisper
+decoder_conf: {}
+preprocessor: default
+preprocessor_conf:
+    whisper_language: zh
+    whisper_task: transcribe
+model_conf:
+    dual_model: true
+    small_model_name: small
+    small_model_file: exp/asr_train_asr_whisper_small_finetune_raw_zh_whisper_multilingual_8:1:1_1e-4_small/valid.acc.ave.pth
+    tiny_model_name: tiny
+    fusion_alpha: 0.5
+    loss_mode: fusion_ce_only
+    freeze_small: true
+    train_tiny: true
+    use_ffm: false
+    ctc_weight: 0.0
+    lsm_weight: 0.0
+    length_normalized_loss: false
+    extract_feats_in_collect_stats: false
+    sym_sos: <|startoftranscript|>
+    sym_eos: <|endoftext|>
+    validation_decode_mode: teacher_forcing
+    validation_beam_size: 3
+    validation_max_tokens: 128
+# null means no random reinitialization after pretrained weights are loaded.
+init: null
+seed: 2022
+num_workers: 2
+num_att_plot: 0
+batch_type: folded
+batch_size: 10
+valid_batch_size: 1
+accum_grad: 4
+max_epoch: 7
+log_interval: 100
+use_amp: true
+cudnn_deterministic: false
+cudnn_benchmark: false
+optim: adamw
+optim_conf:
+    lr: 0.0001
+    weight_decay: 0.01
+    betas: [0.9, 0.99]
+    eps: 0.000001
+scheduler: warmuplr
+scheduler_conf:
+    warmup_steps: 1500
+grad_clip: 1.0
+early_stopping_criterion: [valid, loss, min]
+best_model_criterion:
+    - [valid, loss, min]
+keep_nbest_models: 3
+patience: 3

@@ -1,0 +1,94 @@
+model: proxy_espnet
+normalize: null
+                 # 防止 build_model() 报错
+
+# 2. 中文前处理器配置 (保留中文转录标识)
+preprocessor: default
+preprocessor_conf:
+    whisper_language: "zh"
+    whisper_task: "transcribe"
+
+# 3. 主模型 (Base/Large Model) 配置 
+encoder: whisper
+encoder_conf:
+    whisper_model: small
+    dropout_rate: 0.0
+
+decoder: whisper
+decoder_conf:
+    whisper_model: small
+    dropout_rate: 0.0
+    use_proxy_tuning: true
+
+# 4. 代理模型 (Proxy/Small Model) 配置
+proxy_encoder: whisper
+proxy_encoder_conf:
+    whisper_model: tiny
+    dropout_rate: 0.0
+
+proxy_decoder: whisper
+proxy_decoder_conf:
+    whisper_model: tiny
+    dropout_rate: 0.0
+    use_proxy_tuning: true
+    #use_decoder_fusion_module: false
+
+# 5. 顶层损失与特殊 Token 配置
+model_conf:
+    ctc_weight: 0.0
+    lsm_weight: 0.1
+    length_normalized_loss: false
+    extract_feats_in_collect_stats: false
+    sym_sos: "<|startoftranscript|>"
+    sym_eos: "<|endoftext|>"
+    temperature: 1
+
+# 6. 模型选择与早停机制
+
+early_stopping_criterion: ["valid", "acc", "max"]
+patience: 3
+
+frontend: null
+input_size: 1 
+
+seed: 2022
+log_interval: 100
+num_att_plot: 0
+num_workers: 4
+sort_in_batch: descending 
+sort_batch: descending
+batch_type: folded
+batch_size: 10
+accum_grad: 4
+max_epoch: 7
+init: none
+best_model_criterion:
+-   - valid
+    - acc
+    - max
+keep_nbest_models: 3
+
+use_amp: true
+cudnn_deterministic: false
+cudnn_benchmark: false
+
+
+
+valid_batch_type: folded
+valid_batch_size: 12
+
+
+
+optim: adamw
+grad_clip: 1.0
+optim_conf:
+    lr: 1.0e-04
+    weight_decay: 0.01
+    betas:
+    - 0.9
+    - 0.99
+    eps: 1.0e-06
+scheduler: warmuplr
+scheduler_conf:
+    warmup_steps: 1500
+

@@ -1,0 +1,11 @@
+# Match the saved small FFT decoding protocol; pin defaults explicitly.
+beam_size: 3
+ctc_weight: 0.0
+lm_weight: 0.0
+maxlenratio: 0.25
+minlenratio: 0.0
+penalty: 0.0
+normalize_length: false
+nbest: 1
+dtype: float32
+seed: 0

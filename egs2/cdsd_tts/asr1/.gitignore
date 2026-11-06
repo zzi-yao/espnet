@@ -1,0 +1,9 @@
+dump-1h/
+dump-10h/
+exp-1h/
+exp-10h/
+sampling_strategy_report.md
+sampling_strategy_comparison.csv
+batch_distribution_report.md
+batch_distribution_440.csv
+batch_distribution_500.csv

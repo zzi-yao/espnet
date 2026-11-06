@@ -1,0 +1,83 @@
+model: dual_whisper
+frontend: null
+input_size: 1
+normalize: null
+encoder: dual_whisper
+encoder_conf: {}
+decoder: dual_whisper
+decoder_conf: {}
+preprocessor: default
+preprocessor_conf:
+  whisper_language: zh
+  whisper_task: transcribe
+model_conf:
+  dual_model: true
+  small_model_name: small
+  small_model_file: exp/asr_train_asr_whisper_small_finetune_raw_zh_whisper_multilingual_8:1:1_1e-4_small/valid.acc.ave.pth
+  tiny_model_name: tiny
+  fusion_alpha: 0.5
+  loss_mode: fusion_ce_only
+  freeze_small: true
+  train_tiny: true
+  use_ffm: false
+  ctc_weight: 0.0
+  lsm_weight: 0.1
+  length_normalized_loss: false
+  extract_feats_in_collect_stats: false
+  sym_sos: <|startoftranscript|>
+  sym_eos: <|endoftext|>
+  validation_decode_mode: teacher_forcing
+  training_protocol: small_fft
+init: null
+seed: 2022
+num_workers: 4
+num_att_plot: 0
+batch_type: folded
+batch_size: 10
+valid_batch_size: null
+accum_grad: 4
+max_epoch: 7
+log_interval: 100
+use_amp: true
+cudnn_deterministic: false
+cudnn_benchmark: false
+optim: adamw
+optim_conf:
+  lr: 0.0001
+  weight_decay: 0.01
+  betas:
+  - 0.9
+  - 0.99
+  eps: 1.0e-06
+scheduler: warmuplr
+scheduler_conf:
+  warmup_steps: 1500
+grad_clip: 1.0
+early_stopping_criterion:
+- valid
+- loss
+- min
+best_model_criterion:
+- - valid
+  - acc
+  - max
+keep_nbest_models: 3
+patience: null
+grad_clip_type: 2.0
+# Supplied by asr.sh as --fold_length 80000 --fold_length 150.
+# Do not repeat here: argparse action=append would produce four entries.
+sort_batch: descending
+sort_in_batch: descending
+train_dtype: float32
+use_tf32: false
+cudnn_enabled: true
+valid_batch_type: null
+val_scheduler_criterion:
+- valid
+- loss
+num_iters_per_epoch: null
+drop_last_iter: false
+grad_noise: false
+speech_volume_normalize: null
+rir_scp: null
+noise_scp: null

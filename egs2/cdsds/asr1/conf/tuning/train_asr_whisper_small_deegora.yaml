@@ -73,4 +73,4 @@ adapter_conf:
     dropout_rate: 0.05
     target_modules: ["query", "key", "value", "attn.out","mlp.0", "mlp.2"]
 
-init_param: ["exp/asr_train_asr_whisper_small_deegora_raw_zh_whisper_multilingual30rank11/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_deegora_raw_zh_whisper_multilingual48rank22/valid.acc.ave.pth"]
+init_param: ["exp/asr_train_asr_whisper_small_deegora_raw_zh_whisper_multilingual1ran/valid.acc.ave.pth","exp/asr_train_asr_whisper_small_deegora_raw_zh_whisper_multilingual2ran/valid.acc.ave.pth"]

@@ -767,7 +767,7 @@ class DEEGoRALinear(nn.Linear, LoRALayer):
         **kwargs
     ):
         # ====================== 新增：读取预分配秩文件 ======================
-        rank_file_path1 = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual48rank/gora_rank_allocation.json"  #32rank分秩
+        rank_file_path1 = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual32rank/gora_rank_allocation.json"  #32rank分秩
         rank_file_path2 = "/home/q/espnet/egs2/cdsds/asr1/exp/asr_train_asr_whisper_small_gora_raw_zh_whisper_multilingual48rank/gora_rank_allocation.json"
         matched_r1 = r
         matched_r2 = r
